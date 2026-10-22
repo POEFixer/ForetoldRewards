@@ -2181,6 +2181,6 @@ extern "C" PLUGIN_API void DestroyPlugin(Plugin* p) { delete p; }
 POEFIXER_PLUGIN_INFO(
     "ForetoldRewards",
     "Foretold Rewards",
-    "1.0.0",
+    "1.0.1",
     "POEFixer",
     "Shows the priced rewards the Rite of the Nameless can offer on each atlas map, so you can plan your route before you run it.")
