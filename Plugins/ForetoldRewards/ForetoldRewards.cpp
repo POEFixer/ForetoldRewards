@@ -1374,7 +1374,7 @@ private:
         if (!RawRect(grid, x, y, w, h)) return;          // fresh rect -> tracks during movement
         ImVec2 c(x + w * 0.5f, y + h * 0.5f);
         float rad = (std::max)(14.0f, (std::max)(w, h) * 0.6f);
-        ImGui::GetForegroundDrawList()->AddCircle(c, rad, col, 0, 2.5f);
+        ImGui::GetForegroundDrawList()->AddCircle(c, rad, col, 0, 2.5f, ImDrawFlags_StrokeCenter);
     }
 
     void DrawChip(ImDrawList* dl, ImVec2 anchorBottomCenter, const std::string& text, bool start) {
@@ -1404,7 +1404,7 @@ private:
             ImVec2 q0(nodeCenter.x - ts.x * 0.5f - 4, y);
             ImVec2 q1(nodeCenter.x + ts.x * 0.5f + 4, y + lh - 2);
             dl->AddRectFilled(q0, q1, IM_COL32(20, 20, 25, 235), 3.0f);
-            dl->AddRect(q0, q1, L.col, 3.0f, 0, 2.0f);
+            dl->AddRect(q0, q1, L.col, 3.0f, 2.0f, ImDrawFlags_StrokeCenter);
             dl->AddText(ImVec2(nodeCenter.x - ts.x * 0.5f, y + 1), L.col, txt);
             y += lh;
         }
@@ -1827,9 +1827,9 @@ private:
         if (avail > 240.0f) btnW = std::max(240.0f, avail * 0.6f);   // long, but not edge-to-edge on wide windows
         float btnH = ImGui::GetFrameHeight() * 1.3f;                 // prominent but not too tall
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - btnW) * 0.5f);   // centered
-        ImGui::SetWindowFontScale(1.25f);                            // larger label
+        ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.25f);   // larger label
         bool go = ImGui::Button("Find best path", ImVec2(btnW, btnH));
-        ImGui::SetWindowFontScale(1.0f);
+        ImGui::PopFont();
         if (go) StartSearch("", /*bestValue=*/true);                 // route(s) with the highest TOTAL reward value
         if (ImGui::IsItemHovered())
             ImGui::SetTooltip("Show the route(s) with the highest total reward value\n(ties are listed together; deep values are approximate)");
@@ -1969,7 +1969,7 @@ private:
             if (!pts[i].ok) continue;
             bool start = (i == 0);
             dl->AddCircleFilled(pts[i].c, 7.0f, start ? IM_COL32(90, 220, 255, 255) : IM_COL32(255, 210, 90, 255));
-            dl->AddCircle(pts[i].c, 9.0f, IM_COL32(0, 0, 0, 200), 0, 2.0f);
+            dl->AddCircle(pts[i].c, 9.0f, IM_COL32(0, 0, 0, 200), 0, 2.0f, ImDrawFlags_StrokeCenter);
             char num[8]; std::snprintf(num, sizeof(num), "%d", (int)i + 1);
             ImVec2 ns = ImGui::CalcTextSize(num);
             dl->AddText(ImVec2(pts[i].c.x - ns.x * 0.5f, pts[i].c.y - ns.y * 0.5f), IM_COL32(0, 0, 0, 255), num);
@@ -2176,3 +2176,11 @@ private:
 
 extern "C" PLUGIN_API Plugin* CreatePlugin() { return new ForetoldRewardsPlugin(); }
 extern "C" PLUGIN_API void DestroyPlugin(Plugin* p) { delete p; }
+
+// Plugin info: the host checks it before CreatePlugin; the publish tool reads it.
+POEFIXER_PLUGIN_INFO(
+    "ForetoldRewards",
+    "Foretold Rewards",
+    "1.0.0",
+    "POEFixer",
+    "Shows the priced rewards the Rite of the Nameless can offer on each atlas map, so you can plan your route before you run it.")
