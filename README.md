@@ -1,8 +1,8 @@
 # ForetoldRewards — POE2Fixer Plugin
 
-Current version: 1.0.1
+Current version: 1.0.2
 
-Requires POE2Fixer 364 or newer.
+Requires POE2Fixer 366 or newer.
 
 Shows the foretold rewards of the Rite of the Nameless on the endgame atlas: for each map
 that carries a ritual line, the rewards the rite can offer there, priced through the host's

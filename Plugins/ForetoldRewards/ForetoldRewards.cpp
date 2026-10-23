@@ -31,6 +31,7 @@
 #include <set>
 
 #include "plugin_sdk/PluginSDK.h"
+#include "plugin_sdk/PluginInfoWindow.h"
 #include "imgui/imgui.h"
 
 #include "FR_Core.h"
@@ -177,6 +178,7 @@ public:
     ~ForetoldRewardsPlugin() { StopWorker(); }
 
     void DrawSettings() override {
+        SetImGui();   // a separate menu window draws the settings in its own ImGui context
         if (ImGui::BeginTabBar("##fr_tabs")) {
             if (ImGui::BeginTabItem("Settings")) {
                 ImGui::Checkbox("Show window", &m_showWindow);
@@ -227,7 +229,10 @@ public:
             // is fully hidden — no "open the Atlas" placeholder, and we don't grab overlay input just to
             // show an empty status window.
             bool windowVisible = m_showWindow && riteOpen;
-            ctx()->Overlay.SetWantsOverlayInput(riteOpen && (m_showWindow || m_hoverMode));
+            // The window wants the overlay's input only in game (out of the game it takes
+            // the mouse by itself; last frame's mode, as this runs before the window);
+            // hover mode always needs it for the atlas.
+            ctx()->Overlay.SetWantsOverlayInput(riteOpen && ((m_showWindow && !m_windowDetached) || m_hoverMode));
 
             if (riteOpen) {
                 AutoUnlockOnLineChange();      // drop the lock if the atlas line changed
@@ -636,8 +641,8 @@ private:
             else if (removeContains >= 0 && removeContains < (int)m_exclContains.size()) {
                 m_exclContains.erase(m_exclContains.begin() + removeContains); SaveExclusionsMaps();
             }
-            ImGui::EndChild();
         }
+        ImGui::EndChild();   // after every BeginChild, also when it returned false
         ImGui::Separator();
         ImGui::Text("Biomes:");
         if (ImGui::BeginTable("##fr_biomes", 3, ImGuiTableFlags_SizingStretchSame)) {
@@ -1458,6 +1463,10 @@ private:
         // Hover interaction is ALWAYS available, regardless of lock/search display state.
         // (Previously gated on lockState==Idle, which made hover die after a Search.)
         if (ImGui::GetIO().WantCaptureMouse) return;   // cursor over an ImGui window -> don't lock a map under it
+        // The overlay gets no mouse position while the cursor is over one of POEFixer's own
+        // windows lying over the game (the separate menu window, an out-of-game info window
+        // such as this plugin's): no map under them highlights or locks.
+        if (!ImGui::IsMousePosValid()) return;
         if (!m_rectsFresh) {                     // node positions still settling -> wait indicator
             int d = (int)(ImGui::GetTime() * 3) % 4;
             char b[20]; std::snprintf(b, sizeof(b), "loading%.*s", d, "...");
@@ -1836,14 +1845,26 @@ private:
         ImGui::Spacing();
     }
 
+    // The window is one of the host's informational windows (PluginInfoWindow.h): the
+    // host places and sizes it, remembers its place and size in and out of the game,
+    // and draws its gear menu (lock, Game overlay mode, reset position, close). Close
+    // (gear or title-bar X) clears m_showWindow for the session, as the X always did
+    // ("Show window" is not persisted). Every return below ends the window.
     void DrawWindow() {
         const auto& snap = m_core.Snap();
-        ImGui::SetNextWindowSize(ImVec2(640, 560), ImGuiCond_FirstUseEver);
+        PluginSDK::InfoWindowOptions o;
+        o.id = "rewards";
+        o.title = "Foretold Rewards";
+        o.flags = 0;                               // resizable, as before
+        o.defaultPos = ImVec2(60.0f, 60.0f);       // where ImGui placed it before
+        o.defaultSize = ImVec2(640.0f, 560.0f);
         ImGui::SetNextWindowBgAlpha(m_windowAlpha);   // window transparency (opacity slider on the controls row)
-        if (!ImGui::Begin("Foretold Rewards##FR", &m_showWindow)) { ImGui::End(); return; }
+        PluginSDK::InfoWindow window(ctx()->Overlay, o, &m_showWindow);
+        if (window.Began()) m_windowDetached = window.Detached();
+        if (!window) return;
 
-        if (!snap.valid) { ImGui::TextColored(ImVec4(1, 0.7f, 0.2f, 1), "Atlas panel not found - open the Atlas."); ImGui::End(); return; }
-        if (snap.lineSeed == 0) { ImGui::TextDisabled("No Rite line active (apply Head of the King)."); ImGui::End(); return; }
+        if (!snap.valid) { ImGui::TextColored(ImVec4(1, 0.7f, 0.2f, 1), "Atlas panel not found - open the Atlas."); return; }
+        if (snap.lineSeed == 0) { ImGui::TextDisabled("No Rite line active (apply Head of the King)."); return; }
 
         { ScopedT _t(m_prof.windowFilter); EnsureShownIdx(); }
 
@@ -1890,7 +1911,7 @@ private:
         if (m_lockState == LockState::Idle) {
             ImGui::TextDisabled("Hover a map + Ctrl+Alt to lock a START, or search rewards above.");
             ImGui::Text("seed=%08X  pathCap=%d  rects=%d", snap.lineSeed, snap.pathCap, (int)m_rectByGrid.size());
-            ImGui::End(); return;
+            return;
         }
         if (m_lockState == LockState::Computing) {
             int dots = (int)(ImGui::GetTime() * 3) % 4;
@@ -1903,7 +1924,7 @@ private:
                 ImGui::Text("Computing rewards%.*s", dots, "...");
                 ImGui::TextDisabled("(computing reward table + enumerating routes)");
             }
-            ImGui::End(); return;
+            return;
         }
 
         if (m_isSearchResult) {
@@ -1917,6 +1938,7 @@ private:
         ImGui::Separator();
 
         ImGui::TextDisabled("Shown: %d", (int)m_shownIdx.size());
+        // EndChild after every BeginChild, also when it returned false (clipped / collapsed).
         if (ImGui::BeginChild("chains", ImVec2(0, 0), true)) {
             float rowH = ImGui::GetTextLineHeight() * 2.0f + 6.0f;
             ImGuiListClipper clip; clip.Begin((int)m_shownIdx.size(), rowH);
@@ -1924,9 +1946,8 @@ private:
                 for (int row = clip.DisplayStart; row < clip.DisplayEnd; ++row)
                     DrawChainRow(row);
             clip.End();
-            ImGui::EndChild();
         }
-        ImGui::End();
+        ImGui::EndChild();
     }
 
     void DrawAllCoords() {   // debug: grid (x,y) over on-screen nodes (bounded per-frame for FPS)
@@ -2060,6 +2081,7 @@ private:
     bool     m_atlasBuiltLoaded = false;       // price-loaded state the atlas-view cache was built under
     PriceApi::DisplayCurrency m_poolCurrency = PriceApi::DisplayCurrency::Divine;
     bool m_showWindow = true, m_hoverMode = true, m_debug = false, m_debugAllCoords = false;
+    bool m_windowDetached = false;   // the window was drawn out of the game last frame (gear -> Game overlay mode off)
     float m_windowAlpha = 1.0f;   // Foretold Rewards window background opacity (slider; persisted to config/prefs.txt)
     int  m_throttleMs = 120;
 
@@ -2181,6 +2203,6 @@ extern "C" PLUGIN_API void DestroyPlugin(Plugin* p) { delete p; }
 POEFIXER_PLUGIN_INFO(
     "ForetoldRewards",
     "Foretold Rewards",
-    "1.0.1",
+    "1.0.2",
     "POEFixer",
     "Shows the priced rewards the Rite of the Nameless can offer on each atlas map, so you can plan your route before you run it.")
