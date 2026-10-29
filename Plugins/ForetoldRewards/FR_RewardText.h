@@ -1,12 +1,17 @@
-// FR_RewardText.h — map RitualAtlasLineMods stat/mod ids to readable labels.
+// FR_RewardText.h — map RitualAtlasLineMods stat/mod ids to their label keys.
 // Ids are the wide strings read from the reward fn output (entry+0x28 -> row -> +0).
 // "OtherMaps*" = Foretold Proliferation; "Contains*" = Foretold Bounty.
 //
 // The full pool is the 67 rows of Data/Balance/ritualatlaslinemods.datc64, each row's
 // col0 referencing a Mods.datc64 row whose Id is one of the RitualRite* strings below
 // (6 proliferation + 61 bounty). Extracted offline 2026-06-15; AllRewards() is the single
-// source of truth (the label map + the search picker both build from it). Labels are
-// derived from the mod ids and can be calibrated against in-game screenshots.
+// source of truth (the label keys + the search picker both build from it).
+//
+// Texts follow the program language: a reward's label is the plugin text "reward_<Mods Id>"
+// (lang/<code>.json, the prefix listed in lang/dynamic_prefixes.txt; the English is the
+// plugin's own wording, calibrated against in-game screenshots). This header stays free of
+// PluginSDK.h: it hands out keys, and ForetoldRewards.cpp draws them through I18n::Tr.
+// test/test_view.cpp checks that every key built here is in lang/en.json.
 #pragma once
 
 #include <string>
@@ -18,13 +23,18 @@ namespace FR {
 
 enum class RewardCat { Unknown, Proliferation, Bounty };
 
-// One reward in the foretold pool. `group` drives the picker's section headers.
+// One reward in the foretold pool. `group` drives the picker's section headers (a group id:
+// ForetoldRewards.cpp draws it as the plugin's text for that group).
 struct RewardDef {
     const char* id;       // Mods.datc64 Id (the wide string the reward fn returns)
-    const char* label;    // short overlay/picker label
+    const char* labelId;  // the Mods Id whose label is shown: key "reward_<labelId>" (= id but for the swap below)
     RewardCat   cat;      // Proliferation (other maps) | Bounty (this map contains)
     const char* group;    // "Proliferation" | "Unique" | "Omen" | "Currency" | "Crafting"
 };
+
+// The plugin text key of a label id: "reward_" + the Mods Id (lang/dynamic_prefixes.txt).
+inline constexpr const char* kRewardKeyPrefix = "reward_";
+inline std::string RewardKey(const std::string& labelId) { return kRewardKeyPrefix + labelId; }
 
 // ============================ KOSTYL / WORKAROUND (2026-06-16) ============================
 // The reward fn / ritualatlaslinemods source reports BASE Chaos Orb and Exalted Orb SWAPPED: a
@@ -33,7 +43,7 @@ struct RewardDef {
 // NOT fix the root cause (the id<->item mapping is swapped at the data source itself), so we swap
 // the two at the DATA layer below: once for labels (AllRewards) and once for prices
 // (RewardPriceTable). Doing it here keeps EVERY surface consistent automatically — overlay labels,
-// the atlas/pool lists, prices + value sort, AND the search picker (which reads d.label directly).
+// the atlas/pool lists, prices + value sort, AND the search picker (which reads d.labelId directly).
 // Only the BASE orbs are affected; Greater/Perfect Chaos/Exalt are NOT swapped. If the source is
 // ever corrected, delete kChaosExaltSwapPairs and its two uses below. (Quantity is never swapped —
 // only the orb TYPE.)
@@ -46,7 +56,7 @@ inline void ApplyChaosExaltLabelKostyl(std::vector<RewardDef>& v) {
     auto find = [&](const char* id) -> RewardDef* { for (auto& d : v) if (std::string(d.id) == id) return &d; return nullptr; };
     for (auto& p : kChaosExaltSwapPairs) {
         RewardDef* a = find(p[0]); RewardDef* b = find(p[1]);
-        if (a && b) { const char* t = a->label; a->label = b->label; b->label = t; }
+        if (a && b) { const char* t = a->labelId; a->labelId = b->labelId; b->labelId = t; }
     }
 }
 
@@ -55,81 +65,81 @@ inline const std::vector<RewardDef>& AllRewards() {
     static const std::vector<RewardDef> k = [] {
         std::vector<RewardDef> v = {
         // --- Proliferation: applies to OTHER maps in the line (6) ---
-        {"RitualRiteOtherMapsIncreasedTribute",  "+25% Tribute",        RewardCat::Proliferation, "Proliferation"},
-        {"RitualRiteOtherMapsRewardsAmount",     "+Ritual Rewards",     RewardCat::Proliferation, "Proliferation"},
-        {"RitualRiteOtherMapsAdditionalPacks",   "+Monster Packs",      RewardCat::Proliferation, "Proliferation"},
-        {"RitualRiteOtherMapsFreeRerolls",       "+Free Rerolls",       RewardCat::Proliferation, "Proliferation"},
-        {"RitualRiteOtherMapsAdditionalRerolls", "+Additional Rerolls", RewardCat::Proliferation, "Proliferation"},
-        {"RitualRiteOtherMapsRerollCost",        "-Reroll Cost",        RewardCat::Proliferation, "Proliferation"},
+        {"RitualRiteOtherMapsIncreasedTribute",             "RitualRiteOtherMapsIncreasedTribute",             RewardCat::Proliferation,  "Proliferation"},
+        {"RitualRiteOtherMapsRewardsAmount",                "RitualRiteOtherMapsRewardsAmount",                RewardCat::Proliferation,  "Proliferation"},
+        {"RitualRiteOtherMapsAdditionalPacks",              "RitualRiteOtherMapsAdditionalPacks",              RewardCat::Proliferation,  "Proliferation"},
+        {"RitualRiteOtherMapsFreeRerolls",                  "RitualRiteOtherMapsFreeRerolls",                  RewardCat::Proliferation,  "Proliferation"},
+        {"RitualRiteOtherMapsAdditionalRerolls",            "RitualRiteOtherMapsAdditionalRerolls",            RewardCat::Proliferation,  "Proliferation"},
+        {"RitualRiteOtherMapsRerollCost",                   "RitualRiteOtherMapsRerollCost",                   RewardCat::Proliferation,  "Proliferation"},
 
         // --- Bounty: this map's Ritual contains a Unique item (11) ---
-        {"RitualRiteContainsVeryRareUnique",   "Very Rare Unique",     RewardCat::Bounty, "Unique"},
-        {"RitualRiteContainsMageblood",        "Mageblood",            RewardCat::Bounty, "Unique"},
-        {"RitualRiteContainsHeadhunter",       "Headhunter",           RewardCat::Bounty, "Unique"},
-        {"RitualRiteContainsKalandrasTouch",   "Kalandra's Touch",     RewardCat::Bounty, "Unique"},
-        {"RitualRiteContainsQueenOfTheForest", "Queen of the Forest",  RewardCat::Bounty, "Unique"},
-        {"RitualRiteContainsAlphasHowl",       "Alpha's Howl",         RewardCat::Bounty, "Unique"},
-        {"RitualRiteContainsDefianceOfDestiny","Defiance of Destiny",  RewardCat::Bounty, "Unique"},
-        {"RitualRiteContainsYokeOfSuffering",  "Yoke of Suffering",    RewardCat::Bounty, "Unique"},
-        {"RitualRiteContainsAstramentis",      "Astramentis",          RewardCat::Bounty, "Unique"},
-        {"RitualRiteContainsDreamFragments",   "Dream Fragments",      RewardCat::Bounty, "Unique"},
-        {"RitualRiteContainsOriginalSin",      "Original Sin",         RewardCat::Bounty, "Unique"},
+        {"RitualRiteContainsVeryRareUnique",                "RitualRiteContainsVeryRareUnique",                RewardCat::Bounty,         "Unique"},
+        {"RitualRiteContainsMageblood",                     "RitualRiteContainsMageblood",                     RewardCat::Bounty,         "Unique"},
+        {"RitualRiteContainsHeadhunter",                    "RitualRiteContainsHeadhunter",                    RewardCat::Bounty,         "Unique"},
+        {"RitualRiteContainsKalandrasTouch",                "RitualRiteContainsKalandrasTouch",                RewardCat::Bounty,         "Unique"},
+        {"RitualRiteContainsQueenOfTheForest",              "RitualRiteContainsQueenOfTheForest",              RewardCat::Bounty,         "Unique"},
+        {"RitualRiteContainsAlphasHowl",                    "RitualRiteContainsAlphasHowl",                    RewardCat::Bounty,         "Unique"},
+        {"RitualRiteContainsDefianceOfDestiny",             "RitualRiteContainsDefianceOfDestiny",             RewardCat::Bounty,         "Unique"},
+        {"RitualRiteContainsYokeOfSuffering",               "RitualRiteContainsYokeOfSuffering",               RewardCat::Bounty,         "Unique"},
+        {"RitualRiteContainsAstramentis",                   "RitualRiteContainsAstramentis",                   RewardCat::Bounty,         "Unique"},
+        {"RitualRiteContainsDreamFragments",                "RitualRiteContainsDreamFragments",                RewardCat::Bounty,         "Unique"},
+        {"RitualRiteContainsOriginalSin",                   "RitualRiteContainsOriginalSin",                   RewardCat::Bounty,         "Unique"},
 
         // --- Bounty: this map's Ritual contains an Omen (15) ---
-        {"RitualRiteContainsOmenDextralExaltation",      "Omen: Dextral Exaltation",       RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenSinistralExaltation",    "Omen: Sinistral Exaltation",     RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenDextralAnnulment",       "Omen: Dextral Annulment",        RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenSinistralAnnulment",     "Omen: Sinistral Annulment",      RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenDextralErasure",         "Omen: Dextral Erasure",          RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenSinistralErasure",       "Omen: Sinistral Erasure",        RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenDextralCrystallisation", "Omen: Dextral Crystallisation",  RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenSinistralCrystallisation","Omen: Sinistral Crystallisation",RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenGreaterAnnulment",       "Omen: Greater Annulment",        RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenAmelioration",           "Omen: Amelioration",             RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenWhittling",              "Omen: Whittling",                RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenCorruption",             "Omen: Corruption",               RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenBlessed",                "Omen: the Blessed",              RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenChance",                 "Omen: Chance",                   RewardCat::Bounty, "Omen"},
-        {"RitualRiteContainsOmenSanctification",         "Omen: Sanctification",           RewardCat::Bounty, "Omen"},
+        {"RitualRiteContainsOmenDextralExaltation",         "RitualRiteContainsOmenDextralExaltation",         RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenSinistralExaltation",       "RitualRiteContainsOmenSinistralExaltation",       RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenDextralAnnulment",          "RitualRiteContainsOmenDextralAnnulment",          RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenSinistralAnnulment",        "RitualRiteContainsOmenSinistralAnnulment",        RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenDextralErasure",            "RitualRiteContainsOmenDextralErasure",            RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenSinistralErasure",          "RitualRiteContainsOmenSinistralErasure",          RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenDextralCrystallisation",    "RitualRiteContainsOmenDextralCrystallisation",    RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenSinistralCrystallisation",  "RitualRiteContainsOmenSinistralCrystallisation",  RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenGreaterAnnulment",          "RitualRiteContainsOmenGreaterAnnulment",          RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenAmelioration",              "RitualRiteContainsOmenAmelioration",              RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenWhittling",                 "RitualRiteContainsOmenWhittling",                 RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenCorruption",                "RitualRiteContainsOmenCorruption",                RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenBlessed",                   "RitualRiteContainsOmenBlessed",                   RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenChance",                    "RitualRiteContainsOmenChance",                    RewardCat::Bounty,         "Omen"},
+        {"RitualRiteContainsOmenSanctification",            "RitualRiteContainsOmenSanctification",            RewardCat::Bounty,         "Omen"},
 
         // --- Bounty: this map's Ritual contains currency orbs (13) ---
-        {"RitualRiteContainsDivineOrbs",       "Divine Orb",          RewardCat::Bounty, "Currency"},
-        {"RitualRiteContainsDivineOrbs2",      "Divine Orbs x2",      RewardCat::Bounty, "Currency"},
-        {"RitualRiteContainsDivineOrbs5",      "Divine Orbs x5",      RewardCat::Bounty, "Currency"},
-        {"RitualRiteContainsChaosOrbs2",       "Chaos Orbs x2",       RewardCat::Bounty, "Currency"},
-        {"RitualRiteContainsChaosOrbs4",       "Chaos Orbs x4",       RewardCat::Bounty, "Currency"},
-        {"RitualRiteContainsChaosOrbs8",       "Chaos Orbs x8",       RewardCat::Bounty, "Currency"},
-        {"RitualRiteContainsExaltedOrbs2",     "Exalted Orbs x2",     RewardCat::Bounty, "Currency"},
-        {"RitualRiteContainsExaltedOrbs4",     "Exalted Orbs x4",     RewardCat::Bounty, "Currency"},
-        {"RitualRiteContainsExaltedOrbs8",     "Exalted Orbs x8",     RewardCat::Bounty, "Currency"},
-        {"RitualRiteContainsOrbsOfAnnulment",  "Orb of Annulment",    RewardCat::Bounty, "Currency"},
-        {"RitualRiteContainsOrbsOfAnnulment2", "Orbs of Annulment x2",RewardCat::Bounty, "Currency"},
-        {"RitualRiteContainsOrbsOfChance",     "Orb of Chance",       RewardCat::Bounty, "Currency"},
-        {"RitualRiteContainsOrbsOfChance2",    "Orbs of Chance x2",   RewardCat::Bounty, "Currency"},
+        {"RitualRiteContainsDivineOrbs",                    "RitualRiteContainsDivineOrbs",                    RewardCat::Bounty,         "Currency"},
+        {"RitualRiteContainsDivineOrbs2",                   "RitualRiteContainsDivineOrbs2",                   RewardCat::Bounty,         "Currency"},
+        {"RitualRiteContainsDivineOrbs5",                   "RitualRiteContainsDivineOrbs5",                   RewardCat::Bounty,         "Currency"},
+        {"RitualRiteContainsChaosOrbs2",                    "RitualRiteContainsChaosOrbs2",                    RewardCat::Bounty,         "Currency"},
+        {"RitualRiteContainsChaosOrbs4",                    "RitualRiteContainsChaosOrbs4",                    RewardCat::Bounty,         "Currency"},
+        {"RitualRiteContainsChaosOrbs8",                    "RitualRiteContainsChaosOrbs8",                    RewardCat::Bounty,         "Currency"},
+        {"RitualRiteContainsExaltedOrbs2",                  "RitualRiteContainsExaltedOrbs2",                  RewardCat::Bounty,         "Currency"},
+        {"RitualRiteContainsExaltedOrbs4",                  "RitualRiteContainsExaltedOrbs4",                  RewardCat::Bounty,         "Currency"},
+        {"RitualRiteContainsExaltedOrbs8",                  "RitualRiteContainsExaltedOrbs8",                  RewardCat::Bounty,         "Currency"},
+        {"RitualRiteContainsOrbsOfAnnulment",               "RitualRiteContainsOrbsOfAnnulment",               RewardCat::Bounty,         "Currency"},
+        {"RitualRiteContainsOrbsOfAnnulment2",              "RitualRiteContainsOrbsOfAnnulment2",              RewardCat::Bounty,         "Currency"},
+        {"RitualRiteContainsOrbsOfChance",                  "RitualRiteContainsOrbsOfChance",                  RewardCat::Bounty,         "Currency"},
+        {"RitualRiteContainsOrbsOfChance2",                 "RitualRiteContainsOrbsOfChance2",                 RewardCat::Bounty,         "Currency"},
 
         // --- Bounty: this map's Ritual contains Greater/Perfect crafting orbs (22) ---
-        {"RitualRiteContainsGreaterAugmentation2",  "Greater Augmentation x2",  RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterAugmentation4",  "Greater Augmentation x4",  RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterAugmentation8",  "Greater Augmentation x8",  RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterTransmutation2", "Greater Transmutation x2", RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterTransmutation4", "Greater Transmutation x4", RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterTransmutation8", "Greater Transmutation x8", RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterChaos",          "Greater Chaos Orb",        RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterChaos2",         "Greater Chaos x2",         RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterChaos5",         "Greater Chaos x5",         RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterRegal",          "Greater Regal",            RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterRegal2",         "Greater Regal x2",         RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterRegal5",         "Greater Regal x5",         RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterExalt",          "Greater Exalt",            RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterExalt2",         "Greater Exalt x2",         RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsGreaterExalt5",         "Greater Exalt x5",         RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsPerfectAugmentation",   "Perfect Augmentation",     RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsPerfectAugmentation2",  "Perfect Augmentation x2",  RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsPerfectTransmutation",  "Perfect Transmutation",    RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsPerfectTransmutation2", "Perfect Transmutation x2", RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsPerfectChaos",          "Perfect Chaos Orb",        RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsPerfectRegal",          "Perfect Regal Orb",        RewardCat::Bounty, "Crafting"},
-        {"RitualRiteContainsPerfectExalt",          "Perfect Exalt Orb",        RewardCat::Bounty, "Crafting"},
+        {"RitualRiteContainsGreaterAugmentation2",          "RitualRiteContainsGreaterAugmentation2",          RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterAugmentation4",          "RitualRiteContainsGreaterAugmentation4",          RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterAugmentation8",          "RitualRiteContainsGreaterAugmentation8",          RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterTransmutation2",         "RitualRiteContainsGreaterTransmutation2",         RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterTransmutation4",         "RitualRiteContainsGreaterTransmutation4",         RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterTransmutation8",         "RitualRiteContainsGreaterTransmutation8",         RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterChaos",                  "RitualRiteContainsGreaterChaos",                  RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterChaos2",                 "RitualRiteContainsGreaterChaos2",                 RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterChaos5",                 "RitualRiteContainsGreaterChaos5",                 RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterRegal",                  "RitualRiteContainsGreaterRegal",                  RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterRegal2",                 "RitualRiteContainsGreaterRegal2",                 RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterRegal5",                 "RitualRiteContainsGreaterRegal5",                 RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterExalt",                  "RitualRiteContainsGreaterExalt",                  RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterExalt2",                 "RitualRiteContainsGreaterExalt2",                 RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsGreaterExalt5",                 "RitualRiteContainsGreaterExalt5",                 RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsPerfectAugmentation",           "RitualRiteContainsPerfectAugmentation",           RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsPerfectAugmentation2",          "RitualRiteContainsPerfectAugmentation2",          RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsPerfectTransmutation",          "RitualRiteContainsPerfectTransmutation",          RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsPerfectTransmutation2",         "RitualRiteContainsPerfectTransmutation2",         RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsPerfectChaos",                  "RitualRiteContainsPerfectChaos",                  RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsPerfectRegal",                  "RitualRiteContainsPerfectRegal",                  RewardCat::Bounty,         "Crafting"},
+        {"RitualRiteContainsPerfectExalt",                  "RitualRiteContainsPerfectExalt",                  RewardCat::Bounty,         "Crafting"},
         };
         ApplyChaosExaltLabelKostyl(v);   // KOSTYL: swap base Chaos<->Exalted labels (see note above)
         return v;
@@ -143,18 +153,28 @@ inline RewardCat CategoryOf(const std::string& modId) {
     return RewardCat::Unknown;
 }
 
-// Short label for the overlay/picker. Falls back to a prettified id for unknown mods
-// (so a future game-added reward still renders readably).
-inline std::string RewardLabel(const std::string& modId) {
-    static const std::unordered_map<std::string, std::string> kMap = [] {
-        std::unordered_map<std::string, std::string> m;
-        for (const auto& d : AllRewards()) m.emplace(d.id, d.label);
+// The text key of a reward's short overlay/picker label ("reward_<Mods Id>", the base
+// Chaos/Exalted orbs swapped as above); "" for a mod the catalog does not know (draw
+// RewardFallbackLabel then).
+inline const std::unordered_map<std::string, const char*>& RewardLabelIds() {
+    static const std::unordered_map<std::string, const char*> kMap = [] {
+        std::unordered_map<std::string, const char*> m;
+        for (const auto& d : AllRewards()) m.emplace(d.id, d.labelId);
         return m;
     }();
-    auto it = kMap.find(modId);
-    if (it != kMap.end()) return it->second;
+    return kMap;
+}
+inline std::string RewardLabelKey(const std::string& modId) {
+    const auto& m = RewardLabelIds();
+    auto it = m.find(modId);
+    return it != m.end() ? RewardKey(it->second) : std::string();
+}
+inline bool IsCatalogReward(const std::string& modId) { return RewardLabelIds().count(modId) != 0; }
 
-    // Fallback: strip known prefixes and space-out CamelCase.
+// A readable label for a mod the catalog does not know (a future game-added reward): the id
+// spelled out in English, never translated.
+inline std::string RewardFallbackLabel(const std::string& modId) {
+    // Strip known prefixes and space-out CamelCase.
     std::string s = modId;
     for (const char* pfx : { "RitualRiteOtherMaps", "RitualRiteContains", "RitualRite" }) {
         size_t len = std::char_traits<char>::length(pfx);

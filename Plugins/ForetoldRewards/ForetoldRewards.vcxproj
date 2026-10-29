@@ -95,6 +95,8 @@
     <ClInclude Include="FR_RewardText.h" />
     <ClInclude Include="FR_Calc.h" />
     <ClInclude Include="FR_PoolView.h" />
+    <ClInclude Include="FR_Search.h" />
+    <ClInclude Include="lang_en.generated.h" />
   </ItemGroup>
   <Import Project="$(VCTargetsPath)\Microsoft.Cpp.targets" />
   <ImportGroup Label="ExtensionTargets">

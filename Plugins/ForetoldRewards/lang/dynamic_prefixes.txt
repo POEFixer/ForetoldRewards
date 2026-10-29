@@ -1,0 +1,2 @@
+# Keys built at run time: reward_<Mods Id> (FR_RewardText.h RewardLabelKey, one per AllRewards row).
+reward_

@@ -15,7 +15,8 @@ namespace FR {
 
 struct PoolRow {
     std::string id;
-    std::string label;
+    std::string labelKey;        // text key of the label shown ("reward_<id>"); "" when the catalog lacks the id
+    std::string fallbackLabel;   // the id spelled out, shown when labelKey is ""
     std::string group;
     double      chaos = 0.0;   // unit price * qty, in chaos (0 if unpriceable / not found)
     int         qty = 1;
@@ -36,7 +37,8 @@ inline std::vector<PoolRow> BuildPoolView(
         RewardPriceInfo pi = PriceInfoFor(e.id);
         PoolRow r;
         r.id = e.id;
-        r.label = RewardLabel(e.id);
+        r.labelKey = RewardLabelKey(e.id);
+        if (r.labelKey.empty()) r.fallbackLabel = RewardFallbackLabel(e.id);
         r.group = RewardGroup(e.id);
         r.qty = pi.qty;
         r.tier = pi.tier;
@@ -55,7 +57,7 @@ inline std::vector<PoolRow> BuildPoolView(
         bool av = a.priced || a.potential, bv = b.priced || b.potential;
         if (av != bv) return av;                           // value-bearing (real or potential) before "-"
         if (a.chaos != b.chaos) return a.chaos > b.chaos;  // value descending
-        return a.label < b.label;                          // deterministic tiebreak
+        return a.id < b.id;                                // deterministic tiebreak, any language
     });
     return rows;
 }

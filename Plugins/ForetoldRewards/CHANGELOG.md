@@ -1,5 +1,14 @@
 # Changelog
 
+## 1.0.3
+
+- Follows the program language (ten languages).
+- The notes in the settings tabs (the lock hint, exclusions, prices and performance) wrap at the tab's edge instead of running past it.
+- The reward search also matches the English reward names in every language, so the default "Mageblood" and searches typed in English find their chains in every program language (a search typed in another language finds them while that language is shown); the reward picker and its Browse list match the English names too.
+- Searches, the reward picker and the chain filter ignore letter case in every alphabet (Cyrillic, accented letters), not only in English.
+- The result order and colours of a search stay the same after the program language changes.
+- A long search no longer ends in a broken character when it fills the search box.
+
 ## 1.0.2
 
 - Works with the separate menu window (POEFixer 366): the host hands the plugin the right drawing context for its settings tab and for its overlay.

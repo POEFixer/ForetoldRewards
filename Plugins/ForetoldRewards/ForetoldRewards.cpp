@@ -29,14 +29,18 @@
 #include <fstream>
 #include <filesystem>
 #include <set>
+#include <cstdarg>
+#include <sal.h>
 
 #include "plugin_sdk/PluginSDK.h"
+#include "lang_en.generated.h"   // the embedded English: once per DLL, after PluginSDK.h
 #include "plugin_sdk/PluginInfoWindow.h"
 #include "imgui/imgui.h"
 
 #include "FR_Core.h"
 #include "FR_RewardText.h"
 #include "FR_PoolView.h"
+#include "FR_Search.h"
 
 using namespace PluginSDK;
 
@@ -48,7 +52,9 @@ namespace PriceApi {
 enum class DisplayCurrency : int { Divine = 0, Chaos = 2 };
 inline std::string FormatPrice(float value, DisplayCurrency currency) {
     char buf[32];
-    const char* suffix = (currency == DisplayCurrency::Divine) ? "D" : "C";
+    // The currency's one-letter abbreviation in the program language (the number format is code).
+    const char* suffix = currency == DisplayCurrency::Divine ? PluginSDK::I18n::Tr("price_suffix_divine")
+                                                             : PluginSDK::I18n::Tr("price_suffix_chaos");
     if      (value >= 10000.0f) { float k = value / 1000.0f; if (k >= 10.0f) snprintf(buf, sizeof(buf), "%.0fk %s", k, suffix); else snprintf(buf, sizeof(buf), "%.1fk %s", k, suffix); }
     else if (value >= 1000.0f)  snprintf(buf, sizeof(buf), "%.1fk %s", value / 1000.0f, suffix);
     else if (value >= 100.0f)   snprintf(buf, sizeof(buf), "%.0f %s",  value, suffix);
@@ -60,6 +66,72 @@ inline std::string FormatPrice(float value, DisplayCurrency currency) {
 } // namespace PriceApi
 
 namespace {
+// Texts follow the program language (PluginI18n.h): Tr / TrF / TrId / Key and lang/<code>.json.
+// A reward's label is the key "reward_<Mods Id>" built at run time (lang/dynamic_prefixes.txt);
+// the worker thread stores reward ids, and the drawing thread turns them into text.
+using PluginSDK::I18n::Key;
+using PluginSDK::I18n::Tr;
+using PluginSDK::I18n::TrF;
+using PluginSDK::I18n::TrId;
+
+// printf for a TrF argument: Num("%.1f", value). The format is code, never a translation.
+std::string Num(_In_z_ _Printf_format_string_ const char* format, ...) {
+    char buf[128];
+    va_list args;
+    va_start(args, format);
+    std::vsnprintf(buf, sizeof(buf), format, args);
+    va_end(args);
+    return buf;
+}
+void Show(const std::string& text) { ImGui::TextUnformatted(text.c_str()); }
+// A dimmed note wrapped at the tab's edge (a translation may be much longer than the English).
+void Note(const char* text) {
+    ImGui::PushTextWrapPos(0.0f);
+    ImGui::TextDisabled("%s", text);
+    ImGui::PopTextWrapPos();
+}
+// A wrapped tooltip for the last item (a translation may be much longer than the English).
+void Tip(const char* text) {
+    if (!ImGui::IsItemHovered()) return;
+    ImGui::BeginTooltip();
+    ImGui::PushTextWrapPos(ImGui::GetFontSize() * 30.0f);
+    ImGui::TextUnformatted(text);
+    ImGui::PopTextWrapPos();
+    ImGui::EndTooltip();
+}
+// A reward's label in the program language, or the id spelled out for a reward the catalog
+// does not know (a future game-added one).
+std::string RewardText(const std::string& modId) {
+    const std::string key = FR::RewardLabelKey(modId);
+    return key.empty() ? FR::RewardFallbackLabel(modId) : std::string(Tr(key.c_str()));
+}
+// A reward's English label from the embedded English (lang_en.generated.h): searches match it in
+// every language. The id spelled out for a reward the catalog does not know.
+std::string RewardEnglish(const std::string& modId) {
+    return FR::RewardEnglishLabel(kPluginLangEn, modId);
+}
+// A catalog reward's English label, folded (the English never changes: built once); "" for a
+// reward the catalog does not know.
+const std::string& FoldedEnglishLabel(const std::string& modId) {
+    static const std::unordered_map<std::string, std::string> kFolded = [] {
+        std::unordered_map<std::string, std::string> m;
+        for (const auto& d : FR::AllRewards()) m.emplace(d.id, FR::FoldCase(RewardEnglish(d.id)));
+        return m;
+    }();
+    static const std::string kNone;
+    const auto it = kFolded.find(modId);
+    return it != kFolded.end() ? it->second : kNone;
+}
+// A reward group's section title (FR::RewardDef::group is an id, never shown as it is).
+std::string GroupText(const std::string& group) {
+    if (group == "Proliferation") return Tr("group_proliferation");
+    if (group == "Unique")        return Tr("group_unique");
+    if (group == "Omen")          return Tr("group_omen");
+    if (group == "Currency")      return Tr("group_currency");
+    if (group == "Crafting")      return Tr("group_crafting");
+    return group;
+}
+
 FR::Grid FromKey(uint64_t k) {
     return FR::Grid{ (int)(int32_t)(uint32_t)(k >> 32), (int)(int32_t)(uint32_t)(k & 0xFFFFFFFF) };
 }
@@ -106,15 +178,18 @@ const ImU32 kRewardDefaultCol = IM_COL32(150,200,255,255);
 //   0=unavailable, 1=available, 2=completed+available, 3=completed+unavailable.
 constexpr int       MAPSTATE_COMPLETED = 0x2;   // bit1 => completed / "Map Attempted"
 constexpr int       BIOME_COUNT        = 13;
-// Breach Stronghold (BiomeName[9]) is special in routing: a path may START on it (when revealed /
+// Breach Stronghold (BiomeKey(9)) is special in routing: a path may START on it (when revealed /
 // purple) but may NOT pass THROUGH it as a reward node. Every other excluded biome blocks both.
 // See ClassifyMapForRouting + IsEligible. (User-required rule, 2026-06-16.)
 constexpr int       BIOME_BREACH_STRONGHOLD = 9;
 
-const char* BiomeName(int id) {
-    static const char* k[] = { "Water", "Mountain", "Grass", "Forest", "Swamp", "Desert",
-        "City (6)", "City (7)", "City (8)", "Breach Stronghold", "Ocean", "Island", "Oriath" };
-    return (id >= 0 && id < BIOME_COUNT) ? k[id] : "Unknown";
+// A biome's name key, by biome id (drawn through Tr; config/excluded_biomes.txt keeps the ids).
+const char* BiomeKey(int id) {
+    static constexpr const char* k[] = { Key("biome_water"), Key("biome_mountain"), Key("biome_grass"),
+        Key("biome_forest"), Key("biome_swamp"), Key("biome_desert"), Key("biome_city_6"), Key("biome_city_7"),
+        Key("biome_city_8"), Key("biome_breach_stronghold"), Key("biome_ocean"), Key("biome_island"),
+        Key("biome_oriath") };
+    return (id >= 0 && id < BIOME_COUNT) ? k[id] : Key("biome_unknown");
 }
 
 // Default seed for config/excluded_maps.txt on first run (Citadels, Halls, unique maps, Towers).
@@ -180,27 +255,24 @@ public:
     void DrawSettings() override {
         SetImGui();   // a separate menu window draws the settings in its own ImGui context
         if (ImGui::BeginTabBar("##fr_tabs")) {
-            if (ImGui::BeginTabItem("Settings")) {
-                ImGui::Checkbox("Show window", &m_showWindow);
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("The window only appears on the Head of the King reward-selection\n"
-                                      "atlas (the purple-glow Rite line). It stays hidden in the hideout,\n"
-                                      "on a normal atlas, and before the line is applied.");
-                ImGui::Checkbox("Hover mode", &m_hoverMode);
-                ImGui::Checkbox("Debug overlay", &m_debug);
-                if (m_debug) ImGui::Checkbox("Debug: show ALL map coords", &m_debugAllCoords);
-                ImGui::TextDisabled("Hover an atlas map, press Ctrl+Alt to lock it as START.");
+            if (ImGui::BeginTabItem(TrId("tab_settings"))) {
+                ImGui::Checkbox(TrId("settings_show_window"), &m_showWindow);
+                Tip(Tr("settings_show_window_tip"));
+                ImGui::Checkbox(TrId("settings_hover_mode"), &m_hoverMode);
+                ImGui::Checkbox(TrId("settings_debug_overlay"), &m_debug);
+                if (m_debug) ImGui::Checkbox(TrId("settings_debug_all_coords"), &m_debugAllCoords);
+                Note(Tr("settings_lock_hint"));
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Prices")) {
+            if (ImGui::BeginTabItem(TrId("tab_prices"))) {
                 DrawPricesTab();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Exclusions")) {
+            if (ImGui::BeginTabItem(TrId("tab_exclusions"))) {
                 DrawExclusionsTab();
                 ImGui::EndTabItem();
             }
-            if (ImGui::BeginTabItem("Performance")) {
+            if (ImGui::BeginTabItem(TrId("tab_performance"))) {
                 DrawPerfTab();
                 ImGui::EndTabItem();
             }
@@ -210,6 +282,11 @@ public:
 
     void DrawUI() override {
         SetImGui();
+        if (m_chainsRevision != PluginSDK::I18n::Revision()) {   // the program language changed: relabel
+            for (auto& ch : m_chains) LabelChain(ch);
+            m_chainsRevision = PluginSDK::I18n::Revision();
+            m_shownDirty = true;
+        }
         if (!m_core.Bound()) m_core.Bind(ctx());
         bool inGame = ctx()->Game.IsInGame();
         if (!inGame) { ctx()->Overlay.SetWantsOverlayInput(false); return; }
@@ -254,7 +331,9 @@ public:
 private:
     enum class LockState { Idle, Computing, Ready };
     struct Rect { float x = 0, y = 0, w = 0, h = 0; };
-    struct ChainNode { uint64_t grid = 0; std::string name; std::string reward; double value = 0.0; bool potential = false; };
+    // rewardIds: the step's reward Mods ids (the worker's); reward: their labels in the program
+    // language, " + "-joined, set on the drawing thread (LabelChain) and again when it changes.
+    struct ChainNode { uint64_t grid = 0; std::string name; std::vector<std::string> rewardIds; std::string reward; double value = 0.0; bool potential = false; };
     using Chain = std::vector<ChainNode>;
     struct VarLbl { ImU32 col = 0; std::string reward; };   // one stacked reward chip
     struct WorkerInput {
@@ -271,7 +350,8 @@ private:
         bool                                    bestValue = false; // keep only the max total-value chain(s) (ties shown together)
         bool                                    obtainable = false; // collect the route-reachable reward set (background list scan)
         bool                                    append = false;   // true => merge results into existing chains (live scan of NEW starts)
-        std::vector<std::string>                terms;           // lowercased reward search terms (any-match)
+        std::vector<std::string>                terms;           // folded reward search terms (any-match; FR::ParseSearchTerms)
+        std::unordered_set<std::string>         matchIds;        // catalog rewards whose label (program language or English) holds a term: resolved on the drawing thread
         std::vector<uint64_t>                   starts;          // candidate start grids (purple, not excluded)
         std::unordered_set<uint64_t>            purple;          // selVecA (revealed Rite maps): the authoritative reward-map set for the DFS — record markers are unreliable when the atlas is opened in-map via the crown
     };
@@ -509,8 +589,14 @@ private:
         return nm;
     }
 
-    static std::string ToLower(const std::string& s) {
-        std::string r = s; for (char& c : r) c = (char)std::tolower((unsigned char)c); return r;
+    // The folded text (FR::FoldCase) of a drawing-thread string: map names and reward labels repeat
+    // across thousands of chains, so it is cached by the text itself and cleared when it grows
+    // large. Hold one returned reference at a time (a later call may clear the cache).
+    const std::string& Folded(const std::string& s) {
+        const auto it = m_foldCache.find(s);
+        if (it != m_foldCache.end()) return it->second;
+        if (m_foldCache.size() >= 8192) m_foldCache.clear();
+        return m_foldCache.emplace(s, FR::FoldCase(s)).first->second;
     }
 
     // ---------- exclusions config (editable files + UI) ----------
@@ -556,7 +642,7 @@ private:
         std::ifstream sf(ExclDir() / "search.txt");
         if (sf.is_open()) {
             std::string line;
-            if (std::getline(sf, line)) { line = Trim(line); std::snprintf(m_searchBuf, sizeof(m_searchBuf), "%s", line.c_str()); }
+            if (std::getline(sf, line)) { line = Trim(line); FR::CopyUtf8(line, m_searchBuf, sizeof(m_searchBuf)); }
         } else { std::snprintf(m_searchBuf, sizeof(m_searchBuf), "Mageblood"); SaveSearch(); }
         std::ifstream pf(ExclDir() / "prefs.txt");
         if (pf.is_open()) {
@@ -601,16 +687,16 @@ private:
 
     void DrawExclusionsTab() {
         if (!m_exclLoaded) LoadExclusions();
-        ImGui::TextDisabled("Excluded maps/biomes never appear as a start or a path node.");
-        ImGui::TextWrapped("Saved to config/excluded_maps.txt + config/excluded_biomes.txt next to the DLL. Edit there or below.");
-        if (ImGui::Button("Reload from files")) LoadExclusions();
+        Note(Tr("excl_note"));
+        ImGui::TextWrapped("%s", Tr("excl_files"));
+        if (ImGui::Button(TrId("excl_reload"))) LoadExclusions();
         ImGui::Separator();
 
-        ImGui::Text("Maps (exact name, or *substring*):");
-        ImGui::SetNextItemWidth(240);
+        ImGui::TextUnformatted(Tr("excl_maps"));
+        ImGui::SetNextItemWidth(ImGui::GetFontSize() * 18.0f);
         bool add = ImGui::InputText("##fr_excl_add", m_exclAddBuf, sizeof(m_exclAddBuf), ImGuiInputTextFlags_EnterReturnsTrue);
         ImGui::SameLine();
-        add |= ImGui::Button("Add");
+        add |= ImGui::Button(TrId("excl_add"));
         if (add && m_exclAddBuf[0]) {
             std::string s = Trim(m_exclAddBuf);
             if (!s.empty()) {
@@ -644,13 +730,13 @@ private:
         }
         ImGui::EndChild();   // after every BeginChild, also when it returned false
         ImGui::Separator();
-        ImGui::Text("Biomes:");
+        ImGui::TextUnformatted(Tr("excl_biomes"));
         if (ImGui::BeginTable("##fr_biomes", 3, ImGuiTableFlags_SizingStretchSame)) {
             for (int b = 0; b < BIOME_COUNT; ++b) {
                 ImGui::TableNextColumn();
                 bool on = m_exclBiomes.count(b) != 0;
-                char lbl[48]; std::snprintf(lbl, sizeof(lbl), "%s##bi%d", BiomeName(b), b);
-                if (ImGui::Checkbox(lbl, &on)) {
+                const std::string lbl = std::string(Tr(BiomeKey(b))) + "###bi" + std::to_string(b);
+                if (ImGui::Checkbox(lbl.c_str(), &on)) {
                     if (on) m_exclBiomes.insert(b); else m_exclBiomes.erase(b);
                     SaveExclusionsBiomes();
                 }
@@ -662,73 +748,82 @@ private:
     // ---------- performance tab (live instrumentation) ----------
     void DrawPerfTab() {
         ImGuiIO& io = ImGui::GetIO();
-        ImGui::Text("Host FPS: %.1f   (%.2f ms / frame)", io.Framerate, io.Framerate > 0 ? 1000.0f / io.Framerate : 0.0f);
+        Show(TrF("perf_host_fps", { { "fps", Num("%.1f", io.Framerate) },
+                                    { "ms", Num("%.2f", io.Framerate > 0 ? 1000.0f / io.Framerate : 0.0f) } }));
         ImGui::SameLine();
-        if (ImGui::Button("Reset stats")) { m_prof.resetAll(); m_rebuildCount = 0; }
-        ImGui::TextDisabled("last = most recent call | avg = mean since reset | max = worst | n = samples");
+        if (ImGui::Button(TrId("perf_reset"))) { m_prof.resetAll(); m_rebuildCount = 0; }
+        Note(Tr("perf_legend"));
 
-        ImGui::SeparatorText("Per-frame (render thread)");
+        ImGui::SeparatorText(Tr("perf_section_frame"));
         if (ImGui::BeginTable("##fr_perf_frame", 5, ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg)) {
-            ImGui::TableSetupColumn("Section");  ImGui::TableSetupColumn("last ms");
-            ImGui::TableSetupColumn("avg ms");   ImGui::TableSetupColumn("max ms");
-            ImGui::TableSetupColumn("n");        ImGui::TableHeadersRow();
-            auto row = [&](const char* name, const ProfStat& s) {
+            ImGui::TableSetupColumn(TrId("perf_col_section"));  ImGui::TableSetupColumn(TrId("perf_col_last"));
+            ImGui::TableSetupColumn(TrId("perf_col_avg"));      ImGui::TableSetupColumn(TrId("perf_col_max"));
+            ImGui::TableSetupColumn(TrId("perf_col_n"));        ImGui::TableHeadersRow();
+            // A child row (a part of DrawUI's frame) is indented by code; function names stay English.
+            auto row = [&](const char* name, bool child, const ProfStat& s) {
                 ImGui::TableNextRow();
-                ImGui::TableNextColumn(); ImGui::TextUnformatted(name);
+                ImGui::TableNextColumn();
+                if (child) ImGui::Indent();
+                ImGui::TextUnformatted(name);
+                if (child) ImGui::Unindent();
                 ImGui::TableNextColumn(); ImGui::Text("%.3f", s.lastMs());
                 ImGui::TableNextColumn(); ImGui::Text("%.3f", s.avgMs());
                 ImGui::TableNextColumn(); ImGui::Text("%.3f", s.maxMs());
                 ImGui::TableNextColumn(); ImGui::Text("%llu", (unsigned long long)s.n());
             };
-            row("DrawUI (whole plugin frame)", m_prof.drawUI);
-            row("  RebuildRects (on settle)",  m_prof.rebuildRects);
-            row("  DrawRoute",                 m_prof.drawRoute);
-            row("  DrawAllCoords",             m_prof.drawAllCoords);
-            row("  HandleHover",               m_prof.handleHover);
-            row("  Window filter",             m_prof.windowFilter);
-            row("  PollResult",                m_prof.pollResult);
-            row("Core.Update (~8 Hz tick)",    m_prof.coreUpdate);
+            row(Tr("perf_row_draw_ui"),       false, m_prof.drawUI);
+            row(Tr("perf_row_rebuild_rects"), true,  m_prof.rebuildRects);
+            row("DrawRoute",                  true,  m_prof.drawRoute);
+            row("DrawAllCoords",              true,  m_prof.drawAllCoords);
+            row("HandleHover",                true,  m_prof.handleHover);
+            row(Tr("perf_row_window_filter"), true,  m_prof.windowFilter);
+            row("PollResult",                 true,  m_prof.pollResult);
+            row(Tr("perf_row_core_update"),   false, m_prof.coreUpdate);
             ImGui::EndTable();
         }
 
-        ImGui::SeparatorText("ComputeScreenRect (host UI->screen bridge)");
-        ImGui::Text("per call:  avg %.1f us   |   max %.1f us   |   total calls %llu",
-                    m_prof.csr.avgUs(), m_prof.csr.maxUs(), (unsigned long long)m_prof.csr.n());
-        ImGui::Text("calls last frame: %d", m_csrLastFrame);
-        ImGui::Text("calls in last full rebuild: %d   (full rebuilds: %d)", m_csrInLastRebuild, m_rebuildCount);
-        ImGui::Text("affine transform: %s   (residual gate %.1f px)",
-                    m_xform.valid ? "VALID (math, ~0 bridge calls)" : "fallback -> batch", XFORM_MAX_RESIDUAL);
-        ImGui::TextDisabled("Each call = ABI hop + SEH + parent-chain walk. High per-frame count or avg us = top FPS suspect.");
+        ImGui::SeparatorText(Tr("perf_section_csr"));
+        Show(TrF("perf_csr_per_call", { { "avg", Num("%.1f", m_prof.csr.avgUs()) }, { "max", Num("%.1f", m_prof.csr.maxUs()) },
+                                        { "calls", std::to_string(m_prof.csr.n()) } }));
+        Show(TrF("perf_csr_last_frame", { { "count", std::to_string(m_csrLastFrame) } }));
+        Show(TrF("perf_csr_rebuild", { { "count", std::to_string(m_csrInLastRebuild) }, { "rebuilds", std::to_string(m_rebuildCount) } }));
+        Show(TrF("perf_affine", { { "state", m_xform.valid ? Tr("perf_affine_valid") : Tr("perf_affine_fallback") },
+                                  { "px", Num("%.1f", XFORM_MAX_RESIDUAL) } }));
+        Note(Tr("perf_csr_note"));
 
-        ImGui::SeparatorText("Core.Update breakdown (last tick)");
-        ImGui::Text("total %.3f ms  =  conn %.3f  +  nodes %.3f  +  sel %.3f ms",
-                    m_core.perfUpdateMs, m_core.perfConnMs, m_core.perfNodesMs, m_core.perfSelMs);
-        ImGui::Text("nodes %d   connTable %d   revealed/purple %d",
-                    m_core.perfNodeCount, m_core.perfConnCount, m_core.perfRevealedCount);
-        ImGui::TextDisabled("connTable + byGrid std::map are rebuilt EVERY tick (viewport-dependent).");
+        ImGui::SeparatorText(Tr("perf_section_core"));
+        Show(TrF("perf_core_total", { { "total", Num("%.3f", m_core.perfUpdateMs) }, { "conn", Num("%.3f", m_core.perfConnMs) },
+                                      { "nodes", Num("%.3f", m_core.perfNodesMs) }, { "sel", Num("%.3f", m_core.perfSelMs) } }));
+        Show(TrF("perf_core_counts", { { "nodes", std::to_string(m_core.perfNodeCount) }, { "conn", std::to_string(m_core.perfConnCount) },
+                                       { "revealed", std::to_string(m_core.perfRevealedCount) } }));
+        Note(Tr("perf_core_note"));
 
-        ImGui::SeparatorText("Reward table + enumeration (worker thread)");
-        ImGui::Text("reward table: %.1f ms   (weights %d, combos %d, %s)",
-                    m_core.perfInjectMs, m_core.perfWeightCount, m_core.perfComboCount,
-                    m_lastInjectFromCache.load(std::memory_order_relaxed) ? "from cache" : "computed");
-        ImGui::Text("BuildChains:  last %.1f ms  |  avg %.1f ms  |  max %.1f ms",
-                    m_prof.buildChains.lastMs(), m_prof.buildChains.avgMs(), m_prof.buildChains.maxMs());
-        ImGui::Text("last run: explored %d nodes, emitted %d chains",
-                    m_lastExplored.load(std::memory_order_relaxed), m_lastEmitted.load(std::memory_order_relaxed));
+        ImGui::SeparatorText(Tr("perf_section_worker"));
+        Show(TrF("perf_reward_table", { { "ms", Num("%.1f", m_core.perfInjectMs) }, { "weights", std::to_string(m_core.perfWeightCount) },
+                                        { "combos", std::to_string(m_core.perfComboCount) },
+                                        { "source", m_lastInjectFromCache.load(std::memory_order_relaxed) ? Tr("perf_from_cache") : Tr("perf_computed") } }));
+        Show(TrF("perf_build_chains", { { "last", Num("%.1f", m_prof.buildChains.lastMs()) }, { "avg", Num("%.1f", m_prof.buildChains.avgMs()) },
+                                        { "max", Num("%.1f", m_prof.buildChains.maxMs()) } }));
+        Show(TrF("perf_last_run", { { "nodes", std::to_string(m_lastExplored.load(std::memory_order_relaxed)) },
+                                    { "chains", std::to_string(m_lastEmitted.load(std::memory_order_relaxed)) } }));
         int wf = m_workerFaults.load(std::memory_order_relaxed);
-        if (wf > 0) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "worker faults caught: %d (job dropped, host kept alive)", wf);
-        else        ImGui::TextDisabled("worker faults caught: 0");
+        if (wf > 0) ImGui::TextColored(ImVec4(1, 0.4f, 0.4f, 1), "%s", TrF("perf_worker_faults", { { "count", std::to_string(wf) } }).c_str());
+        else        ImGui::TextDisabled("%s", TrF("perf_worker_faults_none", { { "count", "0" } }).c_str());
 
-        ImGui::SeparatorText("Live state");
+        ImGui::SeparatorText(Tr("perf_section_live"));
         const auto& snap = m_core.Snap();
+        // The lock state's own identifier (LockState), the same spelling as the code.
         const char* st = m_lockState == LockState::Idle ? "Idle"
                        : m_lockState == LockState::Computing ? "Computing" : "Ready";
-        ImGui::Text("state %s   chains stored %d   rects %d", st, (int)m_chains.size(), (int)m_rectByGrid.size());
-        ImGui::Text("seed %08X   pathCap %d   valid %d", snap.lineSeed, snap.pathCap, snap.valid ? 1 : 0);
-        ImGui::Text("flags: hover=%d debug=%d allCoords=%d window=%d rectsFresh=%d",
-                    m_hoverMode, m_debug, m_debugAllCoords, m_showWindow, m_rectsFresh ? 1 : 0);
-        if (ImGui::SliderInt("Update throttle (ms)", &m_throttleMs, 16, 500)) {}
-        ImGui::TextDisabled("Lower = fresher hover/rects but more Core.Update cost per second. Default 120.");
+        Show(TrF("perf_state", { { "state", st }, { "chains", std::to_string(m_chains.size()) },
+                                 { "rects", std::to_string(m_rectByGrid.size()) } }));
+        Show(TrF("perf_seed", { { "seed", Num("%08X", snap.lineSeed) }, { "cap", std::to_string(snap.pathCap) },
+                                { "valid", snap.valid ? "1" : "0" } }));
+        Show(TrF("perf_flags", { { "hover", m_hoverMode ? "1" : "0" }, { "debug", m_debug ? "1" : "0" },
+                                 { "all", m_debugAllCoords ? "1" : "0" }, { "window", m_showWindow ? "1" : "0" },
+                                 { "fresh", m_rectsFresh ? "1" : "0" } }));
+        if (ImGui::SliderInt(TrId("perf_throttle"), &m_throttleMs, 16, 500)) {}
+        Note(Tr("perf_throttle_note"));
     }
 
     // ---------- lock / worker ----------
@@ -776,7 +871,7 @@ private:
         m_lockedStart = startGrid; m_lockedSeed = snap.lineSeed; m_isSearchResult = false;
         m_lockState = LockState::Computing; m_chains.clear(); m_selectedChains.clear(); m_selAnchor = -1; m_shownDirty = true;
         m_searchSession = false; m_appendPending = false;   // locking ends any search session
-        m_priorityTerms.clear();   // lock mode has no search terms -> no priority colour/sort
+        m_searchMatch = FR::SearchMatch{};   // lock mode has no search terms -> no priority colour/sort
         m_searchedStarts.clear(); m_chainKeys.clear();
     }
 
@@ -796,10 +891,12 @@ private:
         in.conn     = m_core.Conn();
         in.exclExact    = m_exclExact;
         in.exclContains = m_exclContains;
-        { std::string cur;
-          auto flush = [&]() { std::string t = ToLower(Trim(cur)); if (!t.empty()) in.terms.push_back(t); cur.clear(); };
-          for (char c : termsRaw) { if (c == ',') flush(); else cur += c; } flush(); }
-        m_priorityTerms = in.terms;   // ordered (term[0] = most important) -> drives result sort + colour
+        // The ids each term matches (label in the program language or English), recorded now: the
+        // result sort + colour (term[0] = most important) and the live appends use them, so a
+        // later language switch keeps both.
+        m_searchMatch = MatchSearch(FR::ParseSearchTerms(termsRaw));
+        in.terms    = m_searchMatch.terms;
+        in.matchIds = m_searchMatch.all;
         auto uiStates = ReadUiStates();   // fresh biome/map-state at search time (one transient pass)
         for (const auto& n : snap.nodes) {
             uint64_t k = FR::GridKey(n.grid);
@@ -813,9 +910,9 @@ private:
         }
         m_searchTotal.store((int)in.starts.size());
         m_searchProgress.store(0);
-        m_searchTermsDisplay = bestValue ? std::string("most valuable path") : termsRaw;
+        m_searchTermsDisplay = bestValue ? std::string() : termsRaw;
+        m_searchBestValue    = bestValue;   // shown as the language's "most valuable path"
         m_searchSession     = !bestValue && !oneShot;   // best-value / per-reward Path are one-shot (no live-append)
-        m_searchTermsActive = termsRaw;
         m_searchedStarts.clear();
         m_chainKeys.clear();
         for (uint64_t s : in.starts) m_searchedStarts.insert(s);   // initial pass covers these
@@ -853,9 +950,8 @@ private:
         in.lineSeed = snap.lineSeed; in.pathCap = snap.pathCap;
         in.conn = m_core.Conn();
         in.exclExact = m_exclExact; in.exclContains = m_exclContains;
-        { std::string cur;
-          auto flush = [&]() { std::string t = ToLower(Trim(cur)); if (!t.empty()) in.terms.push_back(t); cur.clear(); };
-          for (char c : m_searchTermsActive) { if (c == ',') flush(); else cur += c; } flush(); }
+        in.terms    = m_searchMatch.terms;   // the session's match, recorded when the search started
+        in.matchIds = m_searchMatch.all;
         auto uiStates = ReadUiStates();   // fresh biome/map-state (only runs when NEW starts exist — after the early-out above)
         for (const auto& n : snap.nodes) {
             uint64_t k = FR::GridKey(n.grid);
@@ -989,13 +1085,13 @@ private:
             if (m_resultAppend) {
                 for (auto& ch : m_resultChains) {
                     std::string key = ChainKey(ch);
-                    if (m_chainKeys.insert(key).second) m_chains.push_back(std::move(ch));
+                    if (m_chainKeys.insert(key).second) { LabelChain(ch); m_chains.push_back(std::move(ch)); }
                 }
                 m_appendPending = false;
             } else {
                 m_chains = std::move(m_resultChains);
                 m_chainKeys.clear();
-                for (auto& ch : m_chains) m_chainKeys.insert(ChainKey(ch));
+                for (auto& ch : m_chains) { m_chainKeys.insert(ChainKey(ch)); LabelChain(ch); }
                 m_selectedChains.clear(); m_selAnchor = -1;
                 m_appendPending = false;   // a replace-result supersedes any pending append
             }
@@ -1127,13 +1223,9 @@ private:
             nameCache[k] = nm;
             return nm;
         };
-        auto rewardLabel = [&](int a3, int a4) -> std::string {
-            if (!tableOk || a3 < 1 || a3 >= (int)table.size() || a4 < 0 || a4 > FR::A4_MAX) return {};
-            std::string s; for (const auto& m : table[a3][a4].mods) { if (!s.empty()) s += " + "; s += FR::RewardLabel(m); }
-            return s;
-        };
-        // Raw reward ids for a step (parallel to rewardLabel) -> outIds union, so every reward a
-        // displayed route contains is guaranteed to appear in the "obtainable this line" table.
+        // Raw reward ids for a step -> the chain's nodes (labelled on the drawing thread) and the
+        // outIds union, so every reward a displayed route contains is guaranteed to appear in the
+        // "obtainable this line" table.
         auto rewardIdsAt = [&](int a3, int a4) -> std::vector<std::string> {
             if (!tableOk || a3 < 1 || a3 >= (int)table.size() || a4 < 0 || a4 > FR::A4_MAX) return {};
             return table[a3][a4].mods;
@@ -1161,10 +1253,9 @@ private:
         };
 
         std::vector<FR::Grid> path;
-        std::vector<std::string> rew;
-        std::vector<double> rewVal;          // per-node reward chaos value (parallel to rew); bestValue ranking
-        std::vector<bool>   rewPot;          // per-node "is potential placeholder" flag (parallel to rew)
-        std::vector<std::vector<std::string>> rewIds;   // per-node reward ids (parallel to rew) -> outIds union
+        std::vector<double> rewVal;          // per-node reward chaos value (parallel to path); bestValue ranking
+        std::vector<bool>   rewPot;          // per-node "is potential placeholder" flag (parallel to path)
+        std::vector<std::vector<std::string>> rewIds;   // per-node reward ids (parallel to path) -> nodes + outIds union
         long long bestCval = -1;             // best total chain value seen (centi-chaos), for bestValue mode
         int explored = 0;
         bool stop = false;
@@ -1172,13 +1263,14 @@ private:
         const int resultCap  = in.search ? SEARCH_RESULT_CAP  : CHAIN_STORE_CAP;
         const auto t0 = std::chrono::steady_clock::now();
 
-        // search match: a chain is kept iff ANY reward (rew[1..]) contains ANY search term.
+        // search match: a chain is kept iff ANY reward (rewIds[1..]) matches ANY search term: a catalog
+        // reward through in.matchIds (its label in the program language or English, resolved on the
+        // drawing thread), a reward the catalog does not know through its English fallback label.
         auto matches = [&]() -> bool {
             if (in.terms.empty()) return true;
-            for (size_t i = 1; i < rew.size(); ++i) {
-                std::string lr = ToLower(rew[i]);
-                for (const auto& t : in.terms) if (!t.empty() && lr.find(t) != std::string::npos) return true;
-            }
+            for (size_t i = 1; i < rewIds.size(); ++i)
+                for (const auto& id : rewIds[i])
+                    if (FR::RewardMatches(in.matchIds, in.terms, id)) return true;
             return false;
         };
         auto emit = [&]() {
@@ -1193,7 +1285,7 @@ private:
             if (outIds) for (const auto& ids : rewIds) for (const auto& id : ids) if (!id.empty()) outIds->insert(id);
             Chain ch; ch.reserve(path.size());
             for (size_t i = 0; i < path.size(); ++i) {
-                ChainNode nd; nd.grid = FR::GridKey(path[i]); nd.name = nameOf(nd.grid); nd.reward = rew[i]; nd.value = rewVal[i]; nd.potential = rewPot[i];
+                ChainNode nd; nd.grid = FR::GridKey(path[i]); nd.name = nameOf(nd.grid); nd.rewardIds = rewIds[i]; nd.value = rewVal[i]; nd.potential = rewPot[i];
                 ch.push_back(std::move(nd));
             }
             out.push_back(std::move(ch));
@@ -1221,9 +1313,9 @@ private:
                 uint64_t ck = FR::GridKey(sorted[r]);
                 if (!isReward(ck) || in.excluded.count(ck)) continue;
                 if (NameExcludedIn(nameOf(ck), in.exclExact, in.exclContains)) continue;
-                path.push_back(sorted[r]); rew.push_back(rewardLabel(a3, r)); rewVal.push_back(rewardValue(a3, r)); rewPot.push_back(rewardPotential(a3, r)); rewIds.push_back(rewardIdsAt(a3, r));
+                path.push_back(sorted[r]); rewVal.push_back(rewardValue(a3, r)); rewPot.push_back(rewardPotential(a3, r)); rewIds.push_back(rewardIdsAt(a3, r));
                 dfs();
-                path.pop_back(); rew.pop_back(); rewVal.pop_back(); rewPot.pop_back(); rewIds.pop_back();
+                path.pop_back(); rewVal.pop_back(); rewPot.pop_back(); rewIds.pop_back();
                 if (stop) return;
             }
         };
@@ -1234,7 +1326,6 @@ private:
             uint64_t s = starts[si];
             if (!(in.search && NameExcludedIn(nameOf(s), in.exclExact, in.exclContains))) {
                 path.assign(1, FromKey(s));
-                rew.assign(1, std::string());
                 rewVal.assign(1, 0.0);
                 rewPot.assign(1, false);
                 rewIds.assign(1, std::vector<std::string>{});
@@ -1414,9 +1505,9 @@ private:
             y += lh;
         }
         if (n > shown) {
-            char b[16]; std::snprintf(b, sizeof(b), "+%d more", n - shown);
-            ImVec2 ts = ImGui::CalcTextSize(b);
-            dl->AddText(ImVec2(nodeCenter.x - ts.x * 0.5f, y + 1), IM_COL32(200, 200, 200, 255), b);
+            const std::string b = TrF("chips_more", { { "count", std::to_string(n - shown) } });
+            ImVec2 ts = ImGui::CalcTextSize(b.c_str());
+            dl->AddText(ImVec2(nodeCenter.x - ts.x * 0.5f, y + 1), IM_COL32(200, 200, 200, 255), b.c_str());
         }
     }
 
@@ -1469,8 +1560,7 @@ private:
         if (!ImGui::IsMousePosValid()) return;
         if (!m_rectsFresh) {                     // node positions still settling -> wait indicator
             int d = (int)(ImGui::GetTime() * 3) % 4;
-            char b[20]; std::snprintf(b, sizeof(b), "loading%.*s", d, "...");
-            DrawBox(mp, { b }, IM_COL32(255, 220, 120, 255));
+            DrawBox(mp, { TrF("hover_loading", { { "dots", std::string(static_cast<size_t>(d), '.') } }) }, IM_COL32(255, 220, 120, 255));
             return;
         }
         // Keep the locked-start ring visible while a single START is locked (not for search results).
@@ -1479,7 +1569,7 @@ private:
         if (!hov) return;
         if (IsEligible(hov)) {                   // only purple (selVecA) Rite reward maps can start a path
             DrawHighlightRing(hov, IM_COL32(190, 130, 255, 255));
-            DrawBox(mp, { NameOf(FromKey(hov)), "Ctrl+Alt: lock as START" }, IM_COL32(190, 130, 255, 255));
+            DrawBox(mp, { NameOf(FromKey(hov)), Tr("hover_lock_hint") }, IM_COL32(190, 130, 255, 255));
             if (comboEdge && m_core.Snap().lineSeed != 0) StartLock(hov);   // replaces the panel with this start
         }
     }
@@ -1532,8 +1622,8 @@ private:
         if (cvChaos > 0.0) {
             float div = ctx()->Prices.GetRates().divineInChaos;
             float tv = (m_poolCurrency == PriceApi::DisplayCurrency::Divine) ? (float)(cvChaos / (div > 0 ? div : 1.0f)) : (float)cvChaos;
-            route += "    | Total: " + PriceApi::FormatPrice(tv, m_poolCurrency);
-            if (hasPotential) route += " (incl. potential)";
+            route += "    | " + TrF("chain_total", { { "value", PriceApi::FormatPrice(tv, m_poolCurrency) } });
+            if (hasPotential) route += std::string(" ") + Tr("chain_incl_potential");
         }
         dl->AddText(ImVec2(textX, p0.y + 2), IM_COL32(235, 235, 245, 255), route.c_str());
         // Reward line: colour each reward by the priority of the search term it matches (term[0] =
@@ -1541,10 +1631,26 @@ private:
         float rx = textX + 14, ry = p0.y + 2 + ImGui::GetTextLineHeight() + 2;
         for (size_t i = 1; i < ch.size(); ++i) {
             if (i > 1) { const char* sep = "  -  "; dl->AddText(ImVec2(rx, ry), IM_COL32(120, 120, 130, 255), sep); rx += ImGui::CalcTextSize(sep).x; }
-            std::string r = ch[i].reward.empty() ? "(none)" : ch[i].reward;
-            dl->AddText(ImVec2(rx, ry), RewardColour(r), r.c_str());
+            std::string r = ch[i].reward.empty() ? std::string(Tr("chain_none")) : ch[i].reward;
+            dl->AddText(ImVec2(rx, ry), RewardColour(ch[i]), r.c_str());
             rx += ImGui::CalcTextSize(r.c_str()).x;
         }
+    }
+
+    // A chain's reward labels in the program language (drawing thread only: PollResult, and DrawUI
+    // when the language changes).
+    static void LabelChain(Chain& ch) {
+        for (auto& nd : ch) {
+            nd.reward.clear();
+            for (const auto& id : nd.rewardIds) { if (!nd.reward.empty()) nd.reward += " + "; nd.reward += RewardText(id); }
+        }
+    }
+    // The catalog rewards each search term matches (drawing thread): its label in the program
+    // language or its English label holds the term. The worker matches a chain by these ids, never
+    // by a text, and the result list ranks and colours by them.
+    static FR::SearchMatch MatchSearch(std::vector<std::string> terms) {
+        return FR::MatchRewardsWithEnglish(std::move(terms),
+                                           [](const std::string& id) { return RewardText(id); }, kPluginLangEn);
     }
 
     static std::string ChainKey(const Chain& ch) {
@@ -1553,44 +1659,42 @@ private:
         return k;
     }
 
+    // The list filter `f` (folded) in a map name, a reward label in the program language or a
+    // reward's English label.
     bool ChainMatches(const Chain& ch, const std::string& f) {
         for (const auto& nd : ch) {
-            if (ToLower(nd.name).find(f) != std::string::npos) return true;
-            if (ToLower(nd.reward).find(f) != std::string::npos) return true;
+            if (Folded(nd.name).find(f) != std::string::npos) return true;
+            if (Folded(nd.reward).find(f) != std::string::npos) return true;
+            for (const auto& id : nd.rewardIds)
+                if (FoldedEnglishLabel(id).find(f) != std::string::npos) return true;
         }
         return false;
     }
 
-    // --- search-result priority (term[0] = most important) ---
-    static constexpr int kNoPriority = 1 << 30;
-    // Lowest search-term index whose text appears in `reward` (0 = most important); kNoPriority if none.
-    int RewardPriorityIdx(const std::string& reward) const {
-        if (m_priorityTerms.empty() || reward.empty()) return kNoPriority;
-        std::string lr = ToLower(reward);
-        for (int i = 0; i < (int)m_priorityTerms.size(); ++i)
-            if (!m_priorityTerms[i].empty() && lr.find(m_priorityTerms[i]) != std::string::npos) return i;
-        return kNoPriority;
-    }
-    // Best (lowest) priority across all of a chain's reward labels — used to order the result list.
+    // --- search-result priority (term[0] = most important), by the ids recorded at search time ---
+    static constexpr int kNoPriority = FR::kNoPriority;
+    // Lowest search-term index matching one of a step's rewards (0 = most important); kNoPriority if none.
+    int NodePriorityIdx(const ChainNode& nd) const { return FR::RewardsPriority(m_searchMatch, nd.rewardIds); }
+    // Best (lowest) priority across all of a chain's rewards — used to order the result list.
     int ChainPriorityIdx(const Chain& ch) const {
         int best = kNoPriority;
-        for (size_t i = 1; i < ch.size(); ++i) { int p = RewardPriorityIdx(ch[i].reward); if (p < best) best = p; }
+        for (size_t i = 1; i < ch.size(); ++i) { int p = NodePriorityIdx(ch[i]); if (p < best) best = p; }
         return best;
     }
-    // Colour for a reward label: the priority term's palette colour (first 12) or the default blue.
-    ImU32 RewardColour(const std::string& reward) const {
-        int p = RewardPriorityIdx(reward);
+    // Colour for a step's rewards: the priority term's palette colour (first 12) or the default blue.
+    ImU32 RewardColour(const ChainNode& nd) const {
+        int p = NodePriorityIdx(nd);
         return (p < kPriorityCount) ? kPriorityPalette[p] : kRewardDefaultCol;
     }
 
     // Rebuild m_shownIdx (filtered chain indices) only when the chain list or the
     // filter text changed. Cheap no-op otherwise — safe to call every frame.
     void EnsureShownIdx() {
-        std::string f = ToLower(m_filter);
+        std::string f = FR::FoldCase(m_filter);
         if (!m_shownDirty && f == m_shownFilter) return;
         m_shownIdx.clear();
         m_shownIdx.reserve(m_chains.size());
-        if (m_priorityTerms.empty()) {
+        if (m_searchMatch.terms.empty()) {
             // lock mode (no search terms): keep DFS order
             for (int i = 0; i < (int)m_chains.size(); ++i)
                 if (f.empty() || ChainMatches(m_chains[i], f)) m_shownIdx.push_back(i);
@@ -1617,8 +1721,8 @@ private:
     // discarded when the box deactivates. Re-assert the value for a few frames after the InputText
     // submits (see DrawWindow) to defeat that clobber.
     void SetSearchText(const std::string& s) {
-        std::snprintf(m_searchBuf, sizeof(m_searchBuf), "%s", s.c_str());
-        m_pendingSearch = s; m_pendingFrames = 3;
+        FR::CopyUtf8(s, m_searchBuf, sizeof(m_searchBuf));   // cut on a character, never inside one
+        m_pendingSearch = m_searchBuf; m_pendingFrames = 3;
         SaveSearch();
     }
     // Replace the term being typed (text after the last comma) with `label`.
@@ -1633,7 +1737,7 @@ private:
     // Append `label` as a new term (no-op if already present).
     void AppendSearchTerm(const std::string& label) {
         std::string s = Trim(m_searchBuf);
-        if (ToLower(s).find(ToLower(label)) != std::string::npos) return;   // already in the box
+        if (FR::FoldCase(s).find(FR::FoldCase(label)) != std::string::npos) return;   // already in the box
         if (!s.empty()) s += (s.back() == ',') ? " " : ", ";
         s += label;
         SetSearchText(s);
@@ -1644,12 +1748,14 @@ private:
         if (!inputActive) return;
         std::string s = m_searchBuf;
         size_t c = s.find_last_of(',');
-        std::string term = ToLower(Trim(c == std::string::npos ? s : s.substr(c + 1)));
+        std::string term = FR::FoldCase(Trim(c == std::string::npos ? s : s.substr(c + 1)));
         if (term.empty()) return;
-        std::vector<const FR::RewardDef*> hits;
+        std::vector<std::pair<const FR::RewardDef*, std::string>> hits;   // reward, its shown label
         for (const auto& d : FR::AllRewards()) {
-            if (ToLower(d.label).find(term) != std::string::npos) {   // match the shown label, not the internal id
-                hits.push_back(&d);
+            std::string label = RewardText(d.id);
+            // match the shown label or the English one (as the search does), not the internal id
+            if (Folded(label).find(term) != std::string::npos || FoldedEnglishLabel(d.id).find(term) != std::string::npos) {
+                hits.emplace_back(&d, std::move(label));
                 if (hits.size() >= 8) break;
             }
         }
@@ -1657,9 +1763,9 @@ private:
         float h = hits.size() * ImGui::GetTextLineHeightWithSpacing() + ImGui::GetStyle().WindowPadding.y * 2.0f;
         ImGui::BeginChild("##fr_autocomplete", ImVec2(width, h), true,
                           ImGuiWindowFlags_NoScrollbar | ImGuiWindowFlags_NoScrollWithMouse);
-        for (const FR::RewardDef* d : hits) {
+        for (const auto& [d, label] : hits) {
             ImGui::PushID(d->id);
-            if (ImGui::Selectable(d->label)) ReplaceActiveTerm(d->label);
+            if (ImGui::Selectable((label + "###pick").c_str())) ReplaceActiveTerm(label);
             ImGui::PopID();
         }
         ImGui::EndChild();
@@ -1670,31 +1776,33 @@ private:
         if (!m_showBrowse) return;
         ImGui::BeginChild("##fr_browser", ImVec2(0, 220), true);
         ImGui::SetNextItemWidth(-1);
-        ImGui::InputTextWithHint("##fr_browse_filter", "filter rewards...", m_browseFilter, sizeof(m_browseFilter));
-        std::string bf = ToLower(Trim(m_browseFilter));
+        ImGui::InputTextWithHint("##fr_browse_filter", Tr("browse_filter_hint"), m_browseFilter, sizeof(m_browseFilter));
+        std::string bf = FR::FoldCase(Trim(m_browseFilter));
         std::string curGroup;
         for (const auto& d : FR::AllRewards()) {
-            if (!bf.empty() && ToLower(d.label).find(bf) == std::string::npos)   // match the shown label only
+            const std::string label = RewardText(d.id);
+            if (!bf.empty() && Folded(label).find(bf) == std::string::npos &&   // the shown label or the English one
+                FoldedEnglishLabel(d.id).find(bf) == std::string::npos)
                 continue;
-            if (curGroup != d.group) { curGroup = d.group; ImGui::SeparatorText(d.group); }
+            if (curGroup != d.group) { curGroup = d.group; ImGui::SeparatorText(GroupText(d.group).c_str()); }
             ImGui::PushID(d.id);
-            if (ImGui::SmallButton("+")) AppendSearchTerm(d.label);
+            if (ImGui::SmallButton("+")) AppendSearchTerm(label);
             ImGui::SameLine();
-            ImGui::TextUnformatted(d.label);
+            ImGui::TextUnformatted(label.c_str());
             ImGui::PopID();
         }
         ImGui::EndChild();
     }
 
     void DrawPricesTab() {
-        ImGui::TextWrapped("Reward values are supplied by the host price service (poe2scout).");
+        ImGui::TextWrapped("%s", Tr("prices_note"));
         ImGui::Separator();
 
         auto st = ctx()->Prices.GetStatus();
-        ImGui::Text("Status: %s", st.loaded ? "loaded" : "loading...");
-        ImGui::Text("Items: %d", st.totalItems);
-        ImGui::Text("Rates: 1 Divine = %.0f Chaos | 1 Exalted = %.1f Chaos",
-                    st.divineInChaos, st.exaltedInChaos);
+        Show(TrF("prices_status", { { "status", st.loaded ? Tr("prices_loaded") : Tr("prices_loading") } }));
+        Show(TrF("prices_items", { { "count", std::to_string(st.totalItems) } }));
+        ImGui::TextWrapped("%s", TrF("prices_rates", { { "divine", Num("%.0f", st.divineInChaos) },
+                                                       { "exalted", Num("%.1f", st.exaltedInChaos) } }).c_str());
 
         ImGui::Separator();
         DrawPoolSection();   // full theoretical pool (moved here from the main window)
@@ -1719,11 +1827,8 @@ private:
             std::string s = PriceApi::FormatPrice(v, m_poolCurrency);
             if (r.potential) {
                 ImGui::TextColored(ImVec4(1.0f, 0.78f, 0.35f, 1.0f), "~%s", s.c_str());
-                if (ImGui::IsItemHovered())
-                    ImGui::SetTooltip("Potential value - not a real price.\n"
-                                      "\"Very Rare Unique\" is a random very rare unique, so it can't be priced;\n"
-                                      "%g Divine is a fixed placeholder so routes that yield it aren't ignored.",
-                                      FR::kVeryRareUniquePotentialDivine);
+                Tip(TrF("pool_potential_tip", { { "reward", RewardText("RitualRiteContainsVeryRareUnique") },
+                                                 { "divine", Num("%g", FR::kVeryRareUniquePotentialDivine) } }).c_str());
             } else {
                 ImGui::TextUnformatted(s.c_str());
             }
@@ -1757,30 +1862,32 @@ private:
         if (snap.lineSeed == 0) return;
         RefreshPoolView();
 
-        char hdr[64];
-        std::snprintf(hdr, sizeof(hdr), "Reward Pool - this line (%d)###fr_pool_hdr", (int)m_poolView.size());
-        if (!ImGui::CollapsingHeader(hdr, ImGuiTreeNodeFlags_DefaultOpen)) return;
+        const std::string hdr = TrF("pool_header", { { "count", std::to_string(m_poolView.size()) } }) + "###fr_pool_hdr";
+        if (!ImGui::CollapsingHeader(hdr.c_str(), ImGuiTreeNodeFlags_DefaultOpen)) return;
 
         bool loaded = ctx()->Prices.GetStatus().loaded;
-        ImGui::TextDisabled("prices %s", loaded ? "loaded" : "loading...");
+        ImGui::TextDisabled("%s", TrF("pool_prices", { { "status", loaded ? Tr("prices_loaded") : Tr("prices_loading") } }).c_str());
         ImGui::SameLine();
-        const char* curLbl = (m_poolCurrency == PriceApi::DisplayCurrency::Divine) ? "Divine" : "Chaos";
-        if (ImGui::SmallButton(curLbl))
+        const std::string curLbl = std::string((m_poolCurrency == PriceApi::DisplayCurrency::Divine)
+            ? Tr("currency_divine") : Tr("currency_chaos")) + "###fr_pool_currency";
+        if (ImGui::SmallButton(curLbl.c_str()))
             m_poolCurrency = (m_poolCurrency == PriceApi::DisplayCurrency::Divine)
                            ? PriceApi::DisplayCurrency::Chaos : PriceApi::DisplayCurrency::Divine;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Toggle value currency");
+        Tip(Tr("pool_toggle_currency"));
 
         float divInChaos = ctx()->Prices.GetRates().divineInChaos;
         ImGuiTableFlags tf = ImGuiTableFlags_Borders | ImGuiTableFlags_RowBg | ImGuiTableFlags_ScrollY;
         if (ImGui::BeginTable("##fr_pool_tbl", 3, tf, ImVec2(0, 260))) {
-            ImGui::TableSetupColumn("Reward", ImGuiTableColumnFlags_WidthStretch);
-            ImGui::TableSetupColumn("Value",  ImGuiTableColumnFlags_WidthFixed, 90.0f);
-            ImGui::TableSetupColumn("Chance", ImGuiTableColumnFlags_WidthFixed, 64.0f);
+            // Fixed columns at width 0 fit their translated header and cells (the table is not resizable).
+            ImGui::TableSetupColumn(TrId("pool_col_reward"), ImGuiTableColumnFlags_WidthStretch);
+            ImGui::TableSetupColumn(TrId("pool_col_value"),  ImGuiTableColumnFlags_WidthFixed, 0.0f);
+            ImGui::TableSetupColumn(TrId("pool_col_chance"), ImGuiTableColumnFlags_WidthFixed, 0.0f);
             ImGui::TableHeadersRow();
             for (const auto& r : m_poolView) {
                 ImGui::TableNextRow();
                 ImGui::TableNextColumn();
-                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(PoolGroupColor(r.group)), "%s", r.label.c_str());
+                const std::string label = r.labelKey.empty() ? r.fallbackLabel : std::string(Tr(r.labelKey.c_str()));
+                ImGui::TextColored(ImGui::ColorConvertU32ToFloat4(PoolGroupColor(r.group)), "%s", label.c_str());
                 ImGui::TableNextColumn();
                 DrawValueCell(r, divInChaos);
                 ImGui::TableNextColumn();
@@ -1789,7 +1896,7 @@ private:
             ImGui::EndTable();
         }
         if (!loaded)
-            ImGui::TextDisabled("(prices still loading from poe2scout; sorted by chance until ready)");
+            Note(Tr("pool_loading_note"));
     }
 
     // Rebuild m_atlasView: the deduped set of rewards obtainable by routing THIS line — every
@@ -1826,7 +1933,7 @@ private:
         ImGui::Spacing();
         float avail = ImGui::GetContentRegionAvail().x;
         if (!ctx()->Prices.GetStatus().loaded) {   // best-path ranks by value -> needs prices; show a centered hint until ready
-            const char* msg = "(prices loading...)";
+            const char* msg = Tr("bar_prices_loading");
             ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - ImGui::CalcTextSize(msg).x) * 0.5f);
             ImGui::TextDisabled("%s", msg);
             ImGui::Spacing();
@@ -1837,11 +1944,10 @@ private:
         float btnH = ImGui::GetFrameHeight() * 1.3f;                 // prominent but not too tall
         ImGui::SetCursorPosX(ImGui::GetCursorPosX() + (avail - btnW) * 0.5f);   // centered
         ImGui::PushFont(nullptr, ImGui::GetStyle().FontSizeBase * 1.25f);   // larger label
-        bool go = ImGui::Button("Find best path", ImVec2(btnW, btnH));
+        bool go = ImGui::Button(TrId("bar_find_best_path"), ImVec2(btnW, btnH));
         ImGui::PopFont();
         if (go) StartSearch("", /*bestValue=*/true);                 // route(s) with the highest TOTAL reward value
-        if (ImGui::IsItemHovered())
-            ImGui::SetTooltip("Show the route(s) with the highest total reward value\n(ties are listed together; deep values are approximate)");
+        Tip(Tr("bar_find_best_path_tip"));
         ImGui::Spacing();
     }
 
@@ -1863,44 +1969,44 @@ private:
         if (window.Began()) m_windowDetached = window.Detached();
         if (!window) return;
 
-        if (!snap.valid) { ImGui::TextColored(ImVec4(1, 0.7f, 0.2f, 1), "Atlas panel not found - open the Atlas."); return; }
-        if (snap.lineSeed == 0) { ImGui::TextDisabled("No Rite line active (apply Head of the King)."); return; }
+        if (!snap.valid) { ImGui::TextColored(ImVec4(1, 0.7f, 0.2f, 1), "%s", Tr("window_no_atlas")); return; }
+        if (snap.lineSeed == 0) { ImGui::TextDisabled("%s", Tr("window_no_line")); return; }
 
         { ScopedT _t(m_prof.windowFilter); EnsureShownIdx(); }
 
         // Single controls row: search input + Search + Clear + Live + Browse toggle, sized so all fit.
         ImGuiStyle& st = ImGui::GetStyle();
         const float alphaW = 64.0f;   // opacity slider width (reserved on the controls row)
-        float reserve = ImGui::CalcTextSize("Search").x + ImGui::CalcTextSize("Clear").x
-                      + (ImGui::GetFrameHeight() + ImGui::CalcTextSize("Live").x)   // Live checkbox
+        float reserve = ImGui::CalcTextSize(Tr("window_search")).x + ImGui::CalcTextSize(Tr("window_clear")).x
+                      + (ImGui::GetFrameHeight() + ImGui::CalcTextSize(Tr("window_live")).x)   // Live checkbox
                       + ImGui::GetFrameHeight()                                     // Browse arrow button (square)
                       + alphaW                                                      // opacity slider
                       + st.FramePadding.x * 4 + st.ItemSpacing.x * 5 + st.ItemInnerSpacing.x + 12.0f;
         float inputW = ImGui::GetContentRegionAvail().x - reserve;
-        if (inputW < 140.0f) inputW = 140.0f;
+        if (inputW < ImGui::GetFontSize() * 10.0f) inputW = ImGui::GetFontSize() * 10.0f;
         ImGui::SetNextItemWidth(inputW);
-        bool go = ImGui::InputTextWithHint("##fr_search", "rewards to find (comma-sep, partial)", m_searchBuf, sizeof(m_searchBuf), ImGuiInputTextFlags_EnterReturnsTrue);
+        bool go = ImGui::InputTextWithHint("##fr_search", Tr("window_search_hint"), m_searchBuf, sizeof(m_searchBuf), ImGuiInputTextFlags_EnterReturnsTrue);
         bool inputActive = ImGui::IsItemActive();   // gates the autocomplete dropdown below
         if (ImGui::IsItemDeactivatedAfterEdit()) SaveSearch();
         // Re-assert a just-picked reward into the box AFTER the InputText submitted, so ImGui's
         // internal edit buffer (kept while the box was focused) doesn't overwrite the pick.
-        if (m_pendingFrames > 0) { std::snprintf(m_searchBuf, sizeof(m_searchBuf), "%s", m_pendingSearch.c_str()); --m_pendingFrames; }
+        if (m_pendingFrames > 0) { FR::CopyUtf8(m_pendingSearch, m_searchBuf, sizeof(m_searchBuf)); --m_pendingFrames; }
         ImGui::SameLine();
-        if ((ImGui::Button("Search") || go) && m_searchBuf[0]) StartSearch(m_searchBuf);
+        if ((ImGui::Button(TrId("window_search")) || go) && m_searchBuf[0]) StartSearch(m_searchBuf);
         ImGui::SameLine();
-        if (ImGui::Button("Clear")) { m_searchBuf[0] = '\0'; if (m_lockState != LockState::Idle) Unlock(); }   // clear the search box (+ reset any active search/lock)
+        if (ImGui::Button(TrId("window_clear"))) { m_searchBuf[0] = '\0'; if (m_lockState != LockState::Idle) Unlock(); }   // clear the search box (+ reset any active search/lock)
         ImGui::SameLine();
-        ImGui::Checkbox("Live", &m_liveSearch);
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Keep scanning newly-loaded atlas areas while you pan");
+        ImGui::Checkbox(TrId("window_live"), &m_liveSearch);
+        Tip(Tr("window_live_tip"));
         ImGui::SameLine();
         if (ImGui::ArrowButton("##fr_browse_toggle", m_showBrowse ? ImGuiDir_Up : ImGuiDir_Down)) m_showBrowse = !m_showBrowse;
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Browse all rewards");
+        Tip(Tr("window_browse_tip"));
         ImGui::SameLine();
         int alphaPct = (int)(m_windowAlpha * 100.0f + 0.5f);
         ImGui::SetNextItemWidth(alphaW);
         if (ImGui::SliderInt("##fr_alpha", &alphaPct, 20, 100, "%d%%")) m_windowAlpha = (float)alphaPct / 100.0f;
         if (ImGui::IsItemDeactivatedAfterEdit()) SavePrefs();
-        if (ImGui::IsItemHovered()) ImGui::SetTooltip("Window opacity");
+        Tip(Tr("window_opacity_tip"));
 
         DrawRewardAutocomplete(inputActive, inputW);   // live dropdown under the box while typing
         DrawRewardBrowser();                            // full grouped list (toggled by the arrow)
@@ -1909,7 +2015,7 @@ private:
         ImGui::Separator();
 
         if (m_lockState == LockState::Idle) {
-            ImGui::TextDisabled("Hover a map + Ctrl+Alt to lock a START, or search rewards above.");
+            ImGui::TextDisabled("%s", Tr("window_idle_hint"));
             ImGui::Text("seed=%08X  pathCap=%d  rects=%d", snap.lineSeed, snap.pathCap, (int)m_rectByGrid.size());
             return;
         }
@@ -1917,27 +2023,29 @@ private:
             int dots = (int)(ImGui::GetTime() * 3) % 4;
             if (m_isSearchResult) {
                 int done = m_searchProgress.load(), tot = m_searchTotal.load();
-                ImGui::Text("Searching%.*s   %d / %d starts", dots, "...", done, tot);
+                Show(TrF("window_searching", { { "dots", std::string(static_cast<size_t>(dots), '.') },
+                                               { "done", std::to_string(done) }, { "total", std::to_string(tot) } }));
                 ImGui::ProgressBar(tot > 0 ? (float)done / (float)tot : 0.0f, ImVec2(-1, 0));
-                ImGui::TextDisabled("(all purple starts; only currently-loaded line maps are covered)");
+                ImGui::TextDisabled("%s", Tr("window_searching_note"));
             } else {
-                ImGui::Text("Computing rewards%.*s", dots, "...");
-                ImGui::TextDisabled("(computing reward table + enumerating routes)");
+                Show(TrF("window_computing", { { "dots", std::string(static_cast<size_t>(dots), '.') } }));
+                ImGui::TextDisabled("%s", Tr("window_computing_note"));
             }
             return;
         }
 
         if (m_isSearchResult) {
-            ImGui::Text("Found %d chains for: %s", (int)m_chains.size(), m_searchTermsDisplay.c_str());
-            if (m_liveSearch && m_appendPending) { ImGui::SameLine(); ImGui::TextDisabled("(scanning new areas...)"); }
+            Show(TrF("window_found", { { "count", std::to_string(m_chains.size()) },
+                                       { "terms", m_searchBestValue ? std::string(Tr("window_most_valuable_path")) : m_searchTermsDisplay } }));
+            if (m_liveSearch && m_appendPending) { ImGui::SameLine(); ImGui::TextDisabled("%s", Tr("window_scanning_new")); }
         }
         else
-            ImGui::Text("Start: %s   (Esc to unlock)", NameOf(FromKey(m_lockedStart)).c_str());
+            Show(TrF("window_start", { { "map", NameOf(FromKey(m_lockedStart)) } }));
         ImGui::SetNextItemWidth(-1);
-        ImGui::InputTextWithHint("##filter", "Filter shown chains by map or reward...", m_filter, sizeof(m_filter));
+        ImGui::InputTextWithHint("##filter", Tr("window_filter_hint"), m_filter, sizeof(m_filter));
         ImGui::Separator();
 
-        ImGui::TextDisabled("Shown: %d", (int)m_shownIdx.size());
+        ImGui::TextDisabled("%s", TrF("window_shown", { { "count", std::to_string(m_shownIdx.size()) } }).c_str());
         // EndChild after every BeginChild, also when it returned false (clipped / collapsed).
         if (ImGui::BeginChild("chains", ImVec2(0, 0), true)) {
             float rowH = ImGui::GetTextLineHeight() * 2.0f + 6.0f;
@@ -1994,7 +2102,7 @@ private:
             char num[8]; std::snprintf(num, sizeof(num), "%d", (int)i + 1);
             ImVec2 ns = ImGui::CalcTextSize(num);
             dl->AddText(ImVec2(pts[i].c.x - ns.x * 0.5f, pts[i].c.y - ns.y * 0.5f), IM_COL32(0, 0, 0, 255), num);
-            const std::string lbl = start ? std::string("START") : ch[i].reward;
+            const std::string lbl = start ? std::string(Tr("route_start")) : ch[i].reward;
             if (!lbl.empty()) DrawChip(dl, ImVec2(pts[i].c.x, pts[i].c.y - 12.0f), lbl, start);
         }
         // off-screen START guide (a searched chain may be anywhere on the line)
@@ -2006,10 +2114,11 @@ private:
                 ImVec2 e = pts[0].c; const float m = 26.0f;
                 e.x = std::clamp(e.x, m, disp.x - m); e.y = std::clamp(e.y, m, disp.y - m);
                 dl->AddCircleFilled(e, 8.0f, IM_COL32(90, 220, 255, 255));
-                DrawChip(dl, ImVec2(e.x, e.y - 10.0f), "START >>", true);
+                DrawChip(dl, ImVec2(e.x, e.y - 10.0f), std::string(Tr("route_start")) + " >>", true);
             } else {                                          // not loaded: pan-to hint at screen centre
                 FR::Grid g = FromKey(ch[0].grid);
-                char b[64]; std::snprintf(b, sizeof(b), "START off-screen - pan to (%d, %d)", g.x, g.y);
+                const std::string text = TrF("route_start_offscreen", { { "x", std::to_string(g.x) }, { "y", std::to_string(g.y) } });
+                const char* b = text.c_str();
                 ImVec2 ts = ImGui::CalcTextSize(b);
                 ImVec2 p(ctr.x - ts.x * 0.5f, ctr.y - 44.0f);
                 dl->AddRectFilled(ImVec2(p.x - 5, p.y - 3), ImVec2(p.x + ts.x + 5, p.y + ts.y + 3), IM_COL32(0, 0, 0, 215), 4.0f);
@@ -2065,9 +2174,9 @@ private:
             DrawStackedChips(dl, ImVec2(cx, cy), kv.second);
         }
 
-        char hdr[64];
-        std::snprintf(hdr, sizeof(hdr), "%d variants selected%s", (int)chains.size(), offscreen ? "  (some off-screen)" : "");
-        dl->AddText(ImVec2(12, 86), IM_COL32(220, 220, 235, 255), hdr);
+        std::string hdr = TrF("variants_selected", { { "count", std::to_string(chains.size()) } });
+        if (offscreen) hdr += std::string("  ") + Tr("variants_some_offscreen");
+        dl->AddText(ImVec2(12, 86), IM_COL32(220, 220, 235, 255), hdr.c_str());
     }
 
     // ---------- members ----------
@@ -2118,7 +2227,8 @@ private:
     // variant overlay
     std::vector<int> m_shownIdx;          // cached filtered chain indices (into m_chains)
     bool m_shownDirty   = true;           // recompute m_shownIdx when chains change
-    std::string m_shownFilter;            // ToLower filter the cache was built for
+    std::string m_shownFilter;            // folded filter the cache was built for
+    std::unordered_map<std::string, std::string> m_foldCache;   // Folded(): text -> FR::FoldCase(text), drawing thread
 
     // exclusions config (loaded from / saved to config/*.txt next to the DLL)
     std::unordered_set<std::string> m_exclExact;
@@ -2134,13 +2244,14 @@ private:
     char m_browseFilter[64] = { 0 };    // filter text inside the Browse panel
     std::string m_pendingSearch;        // reward just picked from autocomplete/browse
     int m_pendingFrames = 0;            // frames left to re-assert it past ImGui's InputText buffer
-    std::string m_searchTermsDisplay;
+    std::string m_searchTermsDisplay;               // the user's terms ("" for a best-value search)
+    bool m_searchBestValue = false;                 // the result is "Find best path" (shown in the program language)
+    uint64_t m_chainsRevision = 0;                  // I18n::Revision() the chain labels were made in
     std::atomic<int> m_searchProgress{ 0 };
     std::atomic<int> m_searchTotal{ 0 };
     bool m_liveSearch = true;                       // UI toggle (default on)
     bool m_searchSession = false;                   // a search is the active display
-    std::string m_searchTermsActive;                // terms for incremental scans
-    std::vector<std::string> m_priorityTerms;       // ordered lowercased search terms (term[0]=most important) for result sort + colour
+    FR::SearchMatch m_searchMatch;                  // the active search's folded terms (term[0]=most important) and the ids each matched, recorded at search time: result sort + colour, incremental scans
     std::unordered_set<uint64_t> m_searchedStarts;  // start grids already scanned this session
     std::unordered_set<std::string> m_chainKeys;    // dedup keys of stored chains
     bool m_appendPending = false;                   // an incremental append job is in flight
@@ -2203,6 +2314,6 @@ extern "C" PLUGIN_API void DestroyPlugin(Plugin* p) { delete p; }
 POEFIXER_PLUGIN_INFO(
     "ForetoldRewards",
     "Foretold Rewards",
-    "1.0.2",
+    "1.0.3",
     "POEFixer",
     "Shows the priced rewards the Rite of the Nameless can offer on each atlas map, so you can plan your route before you run it.")
