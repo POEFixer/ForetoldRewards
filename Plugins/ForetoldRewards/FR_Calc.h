@@ -14,7 +14,7 @@
 //             [0, runningTotal); select the row if draw < rowWeight).
 //   * elig  = pool row eligible iff it has no condition OR v57.lookup(condKey) != 0.
 //   * 2nd   = with prob v57.lookup(26382)% (d100 on a SEPARATE seed), a second reward is
-//             picked with count=1, excluding every row whose Mod shares a stat with the primary.
+//             picked with count=1, excluding every row whose Mod shares a family with the primary.
 //
 // The pool (weights/conditions/reward ids) is STATIC game data baked below from a live dump
 // (Data/Balance/RitualAtlasLineMods.datc64, 67 rows). v57 is read live each call (it depends
@@ -45,9 +45,12 @@ namespace FR {
 // ---- baked pool: RitualAtlasLineMods.datc64, in datc64 ROW ORDER (NOT the grouped order
 // of FR_RewardText::AllRewards). weight = row+0x10; condKey = 0 (always eligible) or the
 // row's condition foreign-key (= row index in the condition dat + 1); rewardStatRid is the
-// zero-based Stats.datc64 row referenced by the primary Mod. The game prevents a compound
-// reward from selecting another Mod that shares this stat. All 67 current Mods have exactly
-// one stat; re-dump this table if RitualAtlasLineMods or its referenced Mods change. ----
+// zero-based Stats.datc64 row of the Mod's Stat1. The game keeps a compound reward off every
+// Mod that shares a Families entry with the primary (read on 06.11.2026); Stat1 stands in for
+// that, because the 67 Mods make the same 47 groups either way. Three Other Maps Mods have
+// carried a second stat since 0.5.5f, ritual_additional_core_league_level, shared between them:
+// no family, so no exclusion. tools/foretold_pool_check.py holds both facts; re-dump this table
+// if RitualAtlasLineMods or its referenced Mods change. ----
 struct CalcPoolRow { int32_t weight; int32_t condKey; int32_t rewardStatRid; const char* id; };
 
 inline const std::vector<CalcPoolRow>& CalcPool() {
@@ -252,7 +255,7 @@ public:
 
 private:
     // Streaming weighted reservoir over eligible pool rows. For a compound second pick,
-    // exclude every row whose reward Mod shares the primary Mod's stat (the game's stat set).
+    // exclude every row whose reward Mod shares the primary Mod's family, by its stand-in above.
     int PickRow(uint32_t lineSeed, uint32_t a3, uint32_t a4, uint32_t count,
                 int32_t excludedStatRid) const {
         CalcWell W = CalcSeedInit(lineSeed, a3, a4, count);

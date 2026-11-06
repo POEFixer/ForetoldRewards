@@ -1,5 +1,9 @@
 # Changelog
 
+## 1.0.5
+
+- Source notes only: how a second reward is kept apart from the first, as of game patch 0.5.5f. Nothing changes in use.
+
 ## 1.0.4
 
 - Built with the current plugin SDK: a controller that is not XInput reports no port (-1) even when ready.
